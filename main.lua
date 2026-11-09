@@ -4,13 +4,28 @@ local function getDistance(x1, y1, x2, y2)
 end
 
 function love.load()
+    sti = require 'libraries/sti'
+    narrator = require 'libraries/narrator'
+    camera = require 'libraries/camera'
+
+    cam = camera()
+
     -- Get the screen dimensions so we know where to spawn things
     screenWidth = love.graphics.getWidth()
     screenHeight = love.graphics.getHeight()
 
+    gameMap = sti('maps/testMap.lua')
+    gameMap:resize(love.graphics.getWidth()*2, love.graphics.getHeight())
+
     -- Set custom cursor
-    local customCursor = love.mouse.newCursor("cursor.png", 16, 16)
+    local customCursor = love.mouse.newCursor("sprites/cursor.png", 16, 16)
     love.mouse.setCursor(customCursor)
+
+    wizard = love.graphics.newImage("sprites/Wizard.png")
+    cyborg = love.graphics.newImage("sprites/Cyborg.png")
+
+
+    narrator:init()
 
     -- Set up the player
     player = {
@@ -18,8 +33,11 @@ function love.load()
         y = screenHeight / 2,
         rotation = 0,
         speed = 200,
-        radius = 15,
+        radius = 16,
         hp = 100,
+
+        --upgrade variables
+        lastupgradescore = 0,
 
         vx = 0, -- x velocity
         vy = 0, -- y velocity
@@ -44,44 +62,59 @@ function love.load()
     shootRate = 0.5 -- Shoot a bullet every x seconds
 
     score = 0
+
+    love.update = love.introDialogue
+    -- love.draw = love.draw2
+    count = 0
+    time = 0
+    lastKeyTime = 0
 end
 
-function love.update(dt)
+function love.introDialogue(dt)
+    time = time + dt
+
+    if narrator:isOpen() then
+        -- Inside a dialog: advance / pick options.
+        if love.keyboard.isDown("space", "return")  and (time - lastKeyTime) > 1 then 
+            lastKeyTime = time
+            narrator:onAction()
+            if not narrator:isOpen() then
+                love.update = love.gameplay
+            end
+        elseif love.keyboard.isDown("up")  and (time - lastKeyTime) > 0.3 then 
+            lastKeyTime = time
+            narrator:prevOption()
+        elseif love.keyboard.isDown("down")  and (time - lastKeyTime) > 0.3 then 
+            lastKeyTime = time
+            narrator:nextOption()
+        end
+    else
+        narrator:startScript("intro")
+    end
+
+    narrator:update(dt)
+end
+
+function love.gameplay(dt)
+
     -- dt is delta time, the time passed since the last frame
     -- Multiply by dt to make sure that movement is smooth no matter the framerate
 
     if player.hp <= 0 then
         return -- Stop updating the game if the player is dead
     end
+    -- Player Upgrade after every 10 score
+    -- when score % 10 == 0, and has not upgraded last update, move to love.upgrade
+    if score > 0 and score % 10 == 0 and score ~= player.lastupgradescore then
+        -- change love.update to love.upgrade
+        --NOT IMPLEMENTEDnarrator:startScript("upgrade")
+        love.update = love.upgrade
+        player.lastupgradescore = score
+    end
 
     -- Keep track of player rotation based on mouse position
     local mouseX, mouseY = love.mouse.getPosition()
     player.rotation = math.atan2(mouseY - player.y, mouseX - player.x)
-
-    -- Randomize which side the enemies come from
-    local side = math.random(1, 4)
-    local spawnX, spawnY
-
-    -- Top
-    if side == 1 then
-        spawnX = math.random(0, screenWidth)
-        spawnY = -30
-
-    -- Bottom
-    elseif side == 2 then
-        spawnX = math.random(0, screenWidth)
-        spawnY = screenHeight + 30
-
-    -- Left
-    elseif side == 3 then
-        spawnX = -30
-        spawnY = math.random(0, screenHeight)
-
-    -- Right
-    elseif side == 4 then
-        spawnX = screenWidth + 30
-        spawnY = math.random(0, screenHeight)
-    end
 
     -- Player movement
     local moveX, moveY = 0, 0
@@ -129,13 +162,39 @@ function love.update(dt)
     enemySpawnTimer = enemySpawnTimer + dt
     if enemySpawnTimer >= enemySpawnRate then
         enemySpawnTimer = 0
+
+            -- Randomize which side the enemies come from
+        local side = math.random(1, 4)
+        local spawnX, spawnY
+
+        -- Top
+        if side == 1 then
+            spawnX = math.random(0, screenWidth)
+            spawnY = -30
+
+        -- Bottom
+        elseif side == 2 then
+            spawnX = math.random(0, screenWidth)
+            spawnY = screenHeight + 30
+
+        -- Left
+        elseif side == 3 then
+            spawnX = -30
+            spawnY = math.random(0, screenHeight)
+
+        -- Right
+        elseif side == 4 then
+            spawnX = screenWidth + 30
+            spawnY = math.random(0, screenHeight)
+        end
         
         -- Spawn enemy at a random location at the top of the screen for simplicity
         local newEnemy = {
             x = spawnX,
             y = spawnY,
+            enemy_hp = 10 + math.floor(score / 5), -- the enemy hp will increase by 1 every 10 score
             speed = 150,
-            radius = 12
+            radius = 16
         }
         table.insert(enemies, newEnemy)
     end
@@ -212,8 +271,11 @@ function love.update(dt)
                 local e = enemies[e_idx]
                 
                 if getDistance(b.x, b.y, e.x, e.y) < b.radius + e.radius then
-                    -- Bullet hit an enemy, remove both and increase score
-                    table.remove(enemies, e_idx)
+                    -- Bullet hit an enemy, decrease enemy HP by 5 and increase score
+                    e.enemy_hp = e.enemy_hp - 5
+                    if e.enemy_hp <= 0 then
+                        table.remove(enemies, e_idx)
+                    end
                     hit = true
                     score = score + 1
                     break -- Stop checking other enemies for this bullet
@@ -228,9 +290,49 @@ function love.update(dt)
     end
 end
 
+function love.upgrade(dt)
+    --[[time = time + dt
+
+    if narrator:isOpen() then
+        if love.keyboard.isDown("space", "return") and (time - lastKeyTime) > 1 then
+            lastKeyTime = time
+            narrator:onAction()
+        elseif love.keyboard.isDown("up") and (time - lastKeyTime) > 0.3 then
+            lastKeyTime = time
+            narrator:prevOption()
+        elseif love.keyboard.isDown("down") and (time - lastKeyTime) > 0.3 then
+            lastKeyTime = time
+            narrator:nextOption()
+        end
+    else
+        love.update = love.gameplay
+    end
+    narrator:update(dt)
+    ]]
+    love.update = love.gameplay
+end
+
 function love.draw()
     -- Draw background
-    love.graphics.clear(0.1, 0.1, 0.15) -- Dark bluish-grey baackground
+    -- love.graphics.clear(0.1, 0.1, 0.15) -- Dark bluish-grey baackground
+
+
+    cam:attach()
+        gameMap:drawLayer(gameMap.layers["Ground"])
+        -- player.anim:draw(player.spriteSheet, player.x, player.y, nil, 6, nil, 6, 9)
+        -- myNPC:draw()
+        -- drNPC:draw()
+        gameMap:drawLayer(gameMap.layers["Trees"])
+
+        -- if nearbyNPC then
+        --     drawInteractPrompt(nearbyNPC)
+        -- end
+    cam:detach()
+
+    love.graphics.print("x = " .. math.floor(player.x) .. " y = " .. math.floor(player.y), 10, 10)
+
+    -- Dialogue UI is drawn last so it sits on top of everything.
+    -- narrator:draw()
 
     if player.hp <= 0 then
         love.graphics.setColor(1, 0, 0)
@@ -238,14 +340,16 @@ function love.draw()
         return
     end
 
-    -- Draw player (green)
-    love.graphics.setColor(0, 1, 0)
-    love.graphics.circle("fill", player.x, player.y, player.radius)
+    -- Draw player
+    love.graphics.setColor(1, 1, 1, 1)
+    -- love.graphics.circle("fill", player.x, player.y, player.radius)
+    love.graphics.draw(wizard, player.x-player.radius, player.y-player.radius, 0, 1.5, 1.5)
 
-    -- Draw enemies (red)
-    love.graphics.setColor(1, 0, 0)
+    -- Draw enemies
+    love.graphics.setColor(1, 1, 1, 1)
     for _, e in ipairs(enemies) do
-        love.graphics.circle("fill", e.x, e.y, e.radius)
+        -- love.graphics.circle("fill", e.x, e.y, e.radius)
+        love.graphics.draw(cyborg, e.x-e.radius, e.y-e.radius, 0, 1.5, 1.5)
     end
 
     -- Draw bullets (yellow)
@@ -258,4 +362,9 @@ function love.draw()
     love.graphics.setColor(1, 1, 1) -- White
     love.graphics.print("HP: " .. player.hp, 10, 10)
     love.graphics.print("Score: " .. score, 10, 30)
+    count = count + 1
+    -- love.graphics.print("time:" .. time .. "count: " .. count, 50, 50)
+
+
+    narrator:draw()
 end
