@@ -18,11 +18,11 @@ function love.load()
     gameMap:resize(love.graphics.getWidth()*2, love.graphics.getHeight())
 
     -- Set custom cursor
-    local customCursor = love.mouse.newCursor("sprites/cursor.png", 16, 16)
-    love.mouse.setCursor(customCursor)
+    --local customCursor = love.mouse.newCursor("sprites/cursor.png", 16, 16)
+    --love.mouse.setCursor(customCursor)
 
-    wizard = love.graphics.newImage("sprites/Wizard.png")
-    cyborg = love.graphics.newImage("sprites/Cyborg.png")
+    wizard = love.graphics.newImage("sprites/wizard.png")
+    cyborg = love.graphics.newImage("sprites/cyborg.png")
 
 
     narrator:init()
