@@ -188,7 +188,11 @@ end
 
 --- Start a script. Accepts either a bound NPC (uses its character + script)
 --- or a raw script name string.
-function narrator:startScript(npcOrScriptName)
+-- opts (optional):
+--   opts.content  ink source as a string, used instead of loading scripts/<name>.ink
+--   opts.observe  table { variableName = function(value) ... end }
+function narrator:startScript(npcOrScriptName, opts)
+    opts = opts or {}
     local npc, scriptName, character
 
     if type(npcOrScriptName) == "string" then
@@ -201,14 +205,23 @@ function narrator:startScript(npcOrScriptName)
         assert(scriptName, "narrator:startScript - this NPC has no bound script. Did you call narrator:bindNPC?")
     end
 
-    -- Read the .ink file via love.filesystem so it works no matter where the
-    -- game is launched from (or when packaged as a .love archive).
-    local path = "scripts/" .. scriptName .. ".ink"
-    local content, err = love.filesystem.read(path)
-    assert(content, "narrator: could not load " .. path .. " (" .. tostring(err) .. ")")
+    -- Use ink source passed in directly, otherwise read scripts/<name>.ink
+    local content = opts.content
+    if not content then
+        local path = "scripts/" .. scriptName .. ".ink"
+        local err
+        content, err = love.filesystem.read(path)
+        assert(content, "narrator: could not load " .. path .. " (" .. tostring(err) .. ")")
+    end
 
     local book  = NarratorLib.parse_content(content)
     local story = NarratorLib.init_story(book)
+
+    -- Call a Lua function whenever an ink variable changes
+    for varName, handler in pairs(opts.observe or {}) do
+        story:observe(varName, handler)
+    end
+
     story:begin()
 
     if npc then npc.isTalking = true end
