@@ -47,7 +47,7 @@ local upgradePool = {
       text = "The ground slips away beneath your boots.",
       apply = function() player.speed = player.speed + 25 end },
 }
- 
+
 local pendingUpgrade = nil  -- set by the ink observer, applied when the dialogue closes
 local ignoreDash = false    -- stops a held space (used to close the dialogue) from dashing
  
@@ -103,10 +103,18 @@ end
 --
  
 function love.keypressed(key)
-    -- Restart after game over
-    if player and player.hp <= 0 then
+    --Game over: Enter returns to the main menu
+    if love.update == love.gameover then
         if key == "return" or key == "kpenter" then
-            love.load()
+            love.update = love.menu
+        end
+        return
+    end
+
+    -- Main menu: Enter starts the game
+    if love.update == love.menu then
+        if key == "return" or key == "kpenter" then
+            startGame()
         end
         return
     end
@@ -162,8 +170,18 @@ function love.load()
     wizardImage, wizardAnimation = loadSheet("sprites/wizard.png", 0.2)
     cyborgImage, cyborgAnimation = loadSheet("sprites/cyborg.png", 0.2)
  
+    background = love.graphics.newImage("sprites/background.png")
+    defaultFont = love.graphics.getFont()
+    menuFont = love.graphics.newFont(24)
+
     narrator:init()
- 
+
+    resetGame()
+    love.update = love.menu
+end
+
+--Resets everything that changes during a run
+function resetGame()
     -- Set up the player
     player = {
         x = screenWidth / 2,
@@ -171,7 +189,7 @@ function love.load()
         rotation = 0,
         speed = 200,
         radius = 16,
-        hp = 100,
+        hp = 100,     -- current HP
         maxHp = 100,
         regen = 0,    -- HP per second
         defense = 0,  -- flat reduction to contact damage
@@ -204,13 +222,24 @@ function love.load()
     score = 0
     pendingUpgrade = nil
     ignoreDash = false
- 
-    love.update = love.introDialogue
 end
  
 --
 -- Update states --------------------------------------------------------------
 --
+
+function startGame()
+    resetGame()
+    love.update = love.introDialogue
+end
+
+function love.menu(dt)
+    -- Menu input is handled in love.keypressed
+end
+
+function love.gameover(dt)
+    -- Game over input is handled in love.keypressed
+end
  
 function love.introDialogue(dt)
     if not narrator:isOpen() then
@@ -226,13 +255,14 @@ end
  
 function love.gameplay(dt)
     if player.hp <= 0 then
-        return -- Stop updating the game if the player is dead
+        love.update = love.gameover
+        return
     end
  
     wizardAnimation:update(dt)
  
-    -- Player upgrade after every 20 score
-    if score > 0 and score % 20 == 0 and score ~= player.lastupgradescore then
+    -- Player upgrade after every 15 score
+    if score > 0 and score % 15 == 0 and score ~= player.lastupgradescore then
         player.lastupgradescore = score
         startUpgrade()
         return
@@ -391,15 +421,36 @@ end
 -- Drawing --------------------------------------------------------------------
 --
  
+local function printShadowed(text, y)
+    love.graphics.setColor(0, 0, 0, 0.8)
+    love.graphics.printf(text, 2, y + 2, screenWidth, "center")
+    love.graphics.setColor(1, 1, 1, 1)
+    love.graphics.printf(text, 0, y, screenWidth, "center")
+end
+
+local function drawMenu()
+    love.graphics.setColor(1, 1, 1, 1)
+    love.graphics.draw(background, 0, 0, 0,
+        screenWidth / background:getWidth(),
+        screenHeight / background:getHeight())
+    printShadowed("Press Enter to start", screenHeight - 70)
+    love.graphics.setFont(defaultFont)
+end
+
 function love.draw()
-    -- Game over screen: draw only this, nothing else
-    if player.hp <= 0 then
+    --draw game over screen if player is dead
+    if love.update == love.gameover then
         love.graphics.clear(0, 0, 0)
         love.graphics.setColor(1, 0, 0)
         love.graphics.printf("GAME OVER", 0, screenHeight / 2 - 30, screenWidth, "center")
         love.graphics.setColor(1, 1, 1)
         love.graphics.printf("Score: " .. score, 0, screenHeight / 2, screenWidth, "center")
-        love.graphics.printf("Press Enter to restart", 0, screenHeight / 2 + 30, screenWidth, "center")
+        love.graphics.printf("Press Enter to continue", 0, screenHeight / 2 + 30, screenWidth, "center")
+        return
+    end
+    --draw main menu if in main menu state
+    if love.update == love.menu then
+        drawMenu()
         return
     end
  
@@ -427,7 +478,7 @@ function love.draw()
  
     -- Draw UI/text (black)
     love.graphics.setColor(0, 0, 0)
-    love.graphics.print("HP: " .. math.floor(player.hp) .. " / " .. player.maxHp, 10, 10)
+    love.graphics.print("HP: " .. math.floor(math.max(0, player.hp)) .. " / " .. player.maxHp, 10, 10)
     love.graphics.print("Score: " .. score, 10, 30)
  
     -- Dialogue UI is drawn last so it sits on top of everything
