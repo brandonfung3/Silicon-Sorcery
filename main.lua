@@ -1,3 +1,5 @@
+-- Made with help from AI - Claude
+
 anim8 = require 'libraries/anim8'
  
 local function loadSheet(path, frameTime)
@@ -5,6 +7,36 @@ local function loadSheet(path, frameTime)
     local grid = anim8.newGrid(32, 32, image:getWidth(), image:getHeight())
     local animation = anim8.newAnimation(grid('1-2', 1, '1-2', 2), frameTime)
     return image, animation
+end
+
+local function loadFireball(path, frameTime)
+    local image = love.graphics.newImage(path)
+    local iw, ih = image:getDimensions()
+
+    local grid, frames, fw, fh
+    if iw > ih then
+        fw, fh = iw / 2, ih
+        grid = anim8.newGrid(fw, fh, iw, ih)
+        frames = grid('1-2', 1)
+    else                       -- 2 frames stacked
+        fw, fh = iw, ih / 2
+        grid = anim8.newGrid(fw, fh, iw, ih)
+        frames = grid(1, '1-2')
+    end
+
+    return image, anim8.newAnimation(frames, frameTime), fw, fh
+end
+
+local HIT_FLASH_TIME = 0.1          -- seconds to flash red when player, enemy is hit
+local PLAYER_INVULN_TIME = 0.5      -- seconds of invulnerability after being hit
+local MAX_DASH_DISTANCE = 150
+local BASE_SHOOT_RATE = 0.5         -- seconds between shots
+local BASE_SPEED = 200
+local BASE_DAMAGE = 5
+
+-- (base + flat added) * percent multiplier
+local function getBulletDamage()
+    return (BASE_DAMAGE + player.flatDamage) * player.damageMult
 end
  
 -- Helper function to find the distance between two points
@@ -15,38 +47,101 @@ end
 --
 -- Upgrades -------------------------------------------------------------------
 --
- 
+-- Random multiplier between 0.8 and 1.2 to add some variety to the upgrades
+local function rollMultiplier()
+    return 0.8 + math.random() * 0.4
+end
+
+local function roundTo(x, decimals)
+    local m = 10 ^ decimals
+    return math.floor(x * m + 0.5) / m
+end
+
+--Formats a number with at most 1 decimal
+local function fmt(n)
+    local s = string.format("%.1f", n)
+    return (s:gsub("%.0$", ""))  -- remove trailing .0
+end
+
 -- Add a new entry here and it automatically joins the random pool.
 -- Avoid [ ] { } | characters in label/text, since they become ink source.
 local upgradePool = {
-    { id = "max_hp",
-      label = "Vitality - +20 max HP",
+    { id = "max_hp", base = 20, decimals = 0,
+      label = function(v) return "Vitality - +" .. fmt(v) .. " max HP" end,
       text = "Your body hardens against the wastes.",
-      apply = function()
-          player.maxHp = player.maxHp + 20
-          player.hp = math.min(player.maxHp, player.hp + 20)
+      apply = function(v)
+          player.maxHp = player.maxHp + v
+          player.hp = math.min(player.maxHp, player.hp + v)
       end },
-    { id = "regen",
-      label = "Regeneration - +1 HP per second",
+    { id = "regen", base = 1,
+      label = function(v) return "Regeneration - +" .. fmt(v) .. " HP per second" end,
       text = "Your wounds begin to close on their own.",
-      apply = function() player.regen = player.regen + 1 end },
-    { id = "fire_rate",
-      label = "Quickened Spells - faster fire rate",
+      apply = function(v) player.regen = roundTo(player.regen + v, 1) end },
+    { id = "fire_rate", base = 10, decimals = 0,   -- percent
+      label = function(v) return "Quickened Spells - +" .. fmt(v) .. "% attack speed" end,
       text = "Your staff hums with eager energy.",
-      apply = function() shootRate = math.max(0.1, shootRate * 0.85) end },
-    { id = "defense",
-      label = "Warding - take less damage",
+      apply = function(v) player.attackSpeed = roundTo(player.attackSpeed + v / 100, 2) end },
+    { id = "defense", base = 2,
+      label = function(v) return "Warding - +" .. fmt(v) .. " armor" end,
       text = "A faint barrier shimmers around you.",
-      apply = function() player.defense = player.defense + 2 end },
-    { id = "damage",
-      label = "Overcharged Bolts - more bullet damage",
+      apply = function(v) player.defense = roundTo(player.defense + v, 1) end },
+    { id = "damage", base = 2,
+      label = function(v) return "Overcharged Bolts - +" .. fmt(v) .. " damage" end,
       text = "Your bolts crackle with raw power.",
-      apply = function() bulletDamage = bulletDamage + 2 end },
-    { id = "speed",
-      label = "Fleet of Foot - move faster",
+      apply = function(v) player.flatDamage = roundTo(player.flatDamage + v, 1) end },
+    { id = "speed", base = 10, decimals = 0,       -- percent
+      label = function(v) return "Fleet of Foot - +" .. fmt(v) .. "% move speed" end,
       text = "The ground slips away beneath your boots.",
-      apply = function() player.speed = player.speed + 25 end },
+      apply = function(v) player.speed = player.speed + v / 100 * BASE_SPEED end },
 }
+
+local MAX_MAJOR = 3
+
+-- The effects aren't implemented yet; the text lines are placeholder flavor.
+local majorPools = {
+    { name = "Wizard", upgrades = {
+        { id = "frostbite",      name = "Frostbite",        text = "Cold creeps along your staff." },
+        { id = "giant_fireball", name = "Giant fireball",   text = "Your flames swell beyond reason." },
+        { id = "celestial_cloak",name = "Celestial Cloak",  text = "Starlight settles over your shoulders." },
+        { id = "arcane_orbit",   name = "Arcane Orbit",     text = "Orbs of power circle you." },
+    }},
+    { name = "Cybernetic", upgrades = {
+        { id = "pulse_cannon",   name = "Pulse Cannon arm",       text = "Your arm whirs and splits into a cannon." },
+        { id = "titanium_bio",   name = "Titanium Bioskeleton",   text = "Metal laces through your bones." },
+        { id = "orbital_strike", name = "Orbital Strike Uplink",  text = "Somewhere above, a satellite wakes." },
+        { id = "rapid_boots",    name = "Rapid-fire Boots",       text = "Your boots hum with restless energy." },
+    }},
+}
+
+local function hasMajor(id)
+    for _, m in ipairs(player.majorUpgrades) do
+        if m.id == id then return true end
+    end
+    return false
+end
+
+-- One random not-yet-owned upgrade from each pool
+local function pickMajorUpgrades()
+    local choices = {}
+    for _, pool in ipairs(majorPools) do
+        local available = {}
+        for _, u in ipairs(pool.upgrades) do
+            if not hasMajor(u.id) then table.insert(available, u) end
+        end
+        if #available > 0 then
+            local u = available[math.random(#available)]
+            table.insert(choices, {
+                id = u.id,
+                label = pool.name .. " - " .. u.name,
+                text = u.text,
+                apply = function()
+                    table.insert(player.majorUpgrades, { id = u.id, name = u.name, pool = pool.name })
+                end,
+            })
+        end
+    end
+    return choices
+end
 
 local pendingUpgrade = nil  -- set by the ink observer, applied when the dialogue closes
 local ignoreDash = false    -- stops a held space (used to close the dialogue) from dashing
@@ -57,17 +152,24 @@ local function pickUpgrades(n)
  
     local picked = {}
     for _ = 1, math.min(n, #pool) do
-        table.insert(picked, table.remove(pool, math.random(#pool)))
+        local u = table.remove(pool, math.random(#pool))
+        local value = roundTo(u.base * rollMultiplier(), u.decimals or 1)
+        table.insert(picked, {
+            id = u.id,
+            label = u.label(value),
+            text = u.text,
+            apply = function() u.apply(value) end,
+        })
     end
     return picked
 end
  
 -- Builds ink source containing only the chosen upgrades
-local function buildUpgradeScript(choices)
+local function buildUpgradeScript(choices, intro)
     local lines = {
         'VAR upgrade = ""',
         "",
-        "Power surges through you. Choose your boon.",
+        intro,
         "",
     }
     for _, u in ipairs(choices) do
@@ -80,15 +182,14 @@ local function buildUpgradeScript(choices)
     return table.concat(lines, "\n")
 end
  
-local function startUpgrade()
+local function startUpgrade(choices, intro)
     pendingUpgrade = nil
-    local choices = pickUpgrades(3)
  
     local byId = {}
     for _, u in ipairs(choices) do byId[u.id] = u end
  
     narrator:startScript("upgrade", {
-        content = buildUpgradeScript(choices),
+        content = buildUpgradeScript(choices, intro),
         observe = {
             upgrade = function(value)
                 if value and value ~= "" then pendingUpgrade = byId[value] end
@@ -118,6 +219,17 @@ function love.keypressed(key)
         end
         return
     end
+
+    --Pause / resume 
+    if key == "escape" then
+        if love.update == love.gameplay then
+            love.update = love.paused
+        elseif love.update == love.paused then
+            love.update = love.gameplay
+        end
+        return
+    end
+    if love.update == love.paused then return end
  
     -- Dialogue controls (intro and upgrade screens)
     local inDialogue = (love.update == love.introDialogue or love.update == love.upgrade)
@@ -167,8 +279,9 @@ function love.load()
     local customCursor = love.mouse.newCursor("sprites/cursor.png", 16, 16)
     love.mouse.setCursor(customCursor)
  
-    wizardImage, wizardAnimation = loadSheet("sprites/wizard.png", 0.2)
+    wizardImage, wizardAnimation = loadSheet("sprites/stickwizard.png", 0.2)
     cyborgImage, cyborgAnimation = loadSheet("sprites/cyborg.png", 0.2)
+    fireballImage, fireballAnimation, fireballW, fireballH = loadFireball("sprites/fireball.png", 0.1)
  
     background = love.graphics.newImage("sprites/background.png")
     defaultFont = love.graphics.getFont()
@@ -189,22 +302,31 @@ function resetGame()
         rotation = 0,
         speed = 200,
         radius = 16,
-        hp = 100,     -- current HP
+        hp = 100,                   -- current HP
         maxHp = 100,
-        regen = 0,    -- HP per second
-        defense = 0,  -- flat reduction to contact damage
+        regen = 0,                  -- HP per second
+        defense = 0,                -- flat reduction from upgrades
+        flatDamage = 0,             -- flat added from upgrades
+        damageMult = 1.0,           --1.0 = 100% damage
+        damageReduction = 0,        -- 0 = 0% damage reduction
+        attackSpeed = 1.0,          -- 1.0 = 100% attack speed
+
+        hitFlashTimer = 0,          -- Time left for hit flash effect
+        invulnTimer = 0,            -- Time left before player can be hit again (after taking damage)
  
         --upgrade variables
         lastupgradescore = 0,
- 
-        vx = 0, -- x velocity
-        vy = 0, -- y velocity
- 
+        lastMajorscore = 0,
+        majorUpgrades = {},         -- list of major upgrades the player has chosen
+
         -- Dash variables
-        dashForce = 1200, -- initial burst speed
-        friction = 8,     -- how much the player is slowed down
-        dashCooldown = 0, -- Timer for dashing
-        dashDelay = 1.0,  -- Time between dashes (in seconds)
+        dashForce = 1200,    -- dash speed in pixels per second
+        dashCooldown = 0,    -- timer until the next dash
+        dashDelay = 1.0,     -- seconds between dashes
+        dashing = false,     -- true while a dash is in progress
+        dashDirX = 0,
+        dashDirY = 0,
+        dashRemaining = 0,   -- distance left to travel
     }
  
     -- Lists to keep track of all active objects on screen
@@ -216,8 +338,6 @@ function resetGame()
     enemySpawnRate = 0.5 -- Spawn an enemy every x seconds
  
     shootTimer = 0
-    shootRate = 0.5 -- Shoot a bullet every x seconds
-    bulletDamage = 5
  
     score = 0
     pendingUpgrade = nil
@@ -240,6 +360,10 @@ end
 function love.gameover(dt)
     -- Game over input is handled in love.keypressed
 end
+
+function love.paused(dt)
+    -- Paused input is handled in love.keypressed
+end
  
 function love.introDialogue(dt)
     if not narrator:isOpen() then
@@ -260,11 +384,34 @@ function love.gameplay(dt)
     end
  
     wizardAnimation:update(dt)
- 
-    -- Player upgrade after every 15 score
+    fireballAnimation:update(dt)
+
+    -- Update the hit flash timer
+    if player.hitFlashTimer > 0 then
+        player.hitFlashTimer = player.hitFlashTimer - dt
+    end
+
+    -- Update the invulnerability timer
+    if player.invulnTimer > 0 then
+        player.invulnTimer = player.invulnTimer - dt
+    end
+    
+    --major upgrade after every 100 score
+    if score > 0 and score % 100 == 0 and score ~= player.lastMajorscore and 
+        #player.majorUpgrades < MAX_MAJOR then
+        player.lastMajorscore = score
+
+        local majorChoices = pickMajorUpgrades()
+        if #majorChoices > 0 then
+            startUpgrade(majorChoices, "A greater power calls to you. Choose your path.")
+            return
+        end
+    end
+
+    -- minor upgrade after every 15 score
     if score > 0 and score % 15 == 0 and score ~= player.lastupgradescore then
         player.lastupgradescore = score
-        startUpgrade()
+        startUpgrade(pickUpgrades(3), "Power surges through you. Choose your boon.")
         return
     end
  
@@ -293,25 +440,38 @@ function love.gameplay(dt)
     player.x = player.x + (moveX * player.speed * dt)
     player.y = player.y + (moveY * player.speed * dt)
  
-    -- Dash: uses the currently held movement keys
+    -- Dash toward the mouse, stopping at the cursor if it's closer than the max distance
     if player.dashCooldown > 0 then
         player.dashCooldown = player.dashCooldown - dt
     end
     if not love.keyboard.isDown("space") then
         ignoreDash = false
     end
-    if love.keyboard.isDown("space") and not ignoreDash and player.dashCooldown <= 0
-        and (moveX ~= 0 or moveY ~= 0) then
-        player.vx = moveX * player.dashForce
-        player.vy = moveY * player.dashForce
-        player.dashCooldown = player.dashDelay
+
+    if love.keyboard.isDown("space") and not ignoreDash
+        and not player.dashing and player.dashCooldown <= 0 then
+        local dx, dy = mouseX - player.x, mouseY - player.y
+        local dist = math.sqrt(dx * dx + dy * dy)
+
+        if dist > 1 then  -- ignore the dash if the cursor is right on top of the player
+            player.dashing = true
+            player.dashDirX = dx / dist
+            player.dashDirY = dy / dist
+            player.dashRemaining = math.min(dist, MAX_DASH_DISTANCE)
+            player.dashCooldown = player.dashDelay
+        end
     end
- 
-    -- Apply velocity, then friction
-    player.x = player.x + (player.vx * dt)
-    player.y = player.y + (player.vy * dt)
-    player.vx = player.vx - (player.vx * player.friction * dt)
-    player.vy = player.vy - (player.vy * player.friction * dt)
+
+    if player.dashing then
+        local step = math.min(player.dashForce * dt, player.dashRemaining)
+        player.x = player.x + player.dashDirX * step
+        player.y = player.y + player.dashDirY * step
+        player.dashRemaining = player.dashRemaining - step
+
+        if player.dashRemaining <= 0 then
+            player.dashing = false
+        end
+    end
  
     -- Keep player on screen
     player.x = math.max(0, math.min(player.x, screenWidth - player.radius))
@@ -343,10 +503,13 @@ function love.gameplay(dt)
         local newEnemy = {
             x = spawnX,
             y = spawnY,
-            enemy_hp = 10 + math.floor(score / 5), -- enemy hp grows with score
+            enemy_hp = 10 + math.floor(score / 5),  -- enemy hp grows with score
+            damage = 10 + math.floor(score / 15),   -- enemy damage grows with score
             speed = 150,
             radius = 16,
-            animation = cyborgAnimation:clone()    -- each enemy gets its own animation clock
+
+            hitFlash = 0,                           -- Time left for hit flash effect
+            animation = cyborgAnimation:clone()     -- each enemy gets its own animation clock
         }
         newEnemy.animation:gotoFrame(math.random(1, 4)) -- so they don't all animate in sync
         table.insert(enemies, newEnemy)
@@ -356,21 +519,30 @@ function love.gameplay(dt)
     for i = #enemies, 1, -1 do
         local e = enemies[i]
         e.animation:update(dt)
+
+        -- Update the hit flash timer
+        if e.hitFlash > 0 then
+            e.hitFlash = math.max(0, e.hitFlash - dt)
+        end
  
         local angle = math.atan2(player.y - e.y, player.x - e.x)
         e.x = e.x + math.cos(angle) * e.speed * dt
         e.y = e.y + math.sin(angle) * e.speed * dt
- 
-        -- Check if enemy touched the player
-        if getDistance(player.x, player.y, e.x, e.y) < player.radius + e.radius then
-            player.hp = player.hp - math.max(1, 10 - player.defense)
-            table.remove(enemies, i)
+
+        -- Check if enemy touched the player (only if the player isn't locked out)
+        if player.invulnTimer <= 0
+            and getDistance(player.x, player.y, e.x, e.y) < player.radius + e.radius then
+            -- flat defense first (minimum 1), then percent reduction
+            local damage = math.max(1, e.damage - player.defense) * (1 - player.damageReduction)
+            player.hp = player.hp - damage
+            player.hitFlashTimer = HIT_FLASH_TIME
+            player.invulnTimer = PLAYER_INVULN_TIME
         end
     end
  
     -- Automatic shooting toward the mouse
     shootTimer = shootTimer + dt
-    if shootTimer >= shootRate then
+    if shootTimer >= BASE_SHOOT_RATE / player.attackSpeed then
         shootTimer = 0
  
         local aimAngle = math.atan2(mouseY - player.y, mouseX - player.x)
@@ -379,6 +551,7 @@ function love.gameplay(dt)
             y = player.y,
             dx = math.cos(aimAngle),
             dy = math.sin(aimAngle),
+            angle = aimAngle,
             speed = 400,
             radius = 5
         })
@@ -398,9 +571,10 @@ function love.gameplay(dt)
             local hit = false
             for e_idx = #enemies, 1, -1 do
                 local e = enemies[e_idx]
- 
+                --if bullet hits enemy, reduce enemy hp and remove bullet
                 if getDistance(b.x, b.y, e.x, e.y) < b.radius + e.radius then
-                    e.enemy_hp = e.enemy_hp - bulletDamage
+                    e.enemy_hp = e.enemy_hp - getBulletDamage()
+                    e.hitFlash = HIT_FLASH_TIME
                     if e.enemy_hp <= 0 then
                         table.remove(enemies, e_idx)
                     end
@@ -437,6 +611,53 @@ local function drawMenu()
     love.graphics.setFont(defaultFont)
 end
 
+function drawPauseMenu()
+    -- Dim the frozen game underneath
+    love.graphics.setColor(0, 0, 0, 0.6)
+    love.graphics.rectangle("fill", 0, 0, screenWidth, screenHeight)
+
+    local boxW, boxH = 380, 460
+    local boxX = (screenWidth - boxW) / 2
+    local boxY = (screenHeight - boxH) / 2
+    love.graphics.setColor(0.1, 0.1, 0.15, 0.95)
+    love.graphics.rectangle("fill", boxX, boxY, boxW, boxH, 8, 8)
+    love.graphics.setColor(1, 1, 1, 1)
+    love.graphics.rectangle("line", boxX, boxY, boxW, boxH, 8, 8)
+
+    love.graphics.setFont(menuFont)
+    love.graphics.printf("PAUSED", boxX, boxY + 15, boxW, "center")
+    love.graphics.setFont(defaultFont)
+
+    local function pct(x) return fmt(x * 100) .. "%" end
+
+    local lines = {
+        "Health: " .. math.floor(math.max(0, player.hp)) .. " / " .. fmt(player.maxHp),
+        string.format("Health regen: %.1f HP/s", player.regen),
+        "Speed: " .. pct(player.speed / BASE_SPEED),
+        "",
+        "Defense",
+        "    Armor: " .. fmt(player.defense),
+        "    Damage reduction: " .. pct(player.damageReduction),
+        "",
+        "Attack",
+        "    Attack speed: " .. pct(player.attackSpeed),        
+        "    Increased damage: " .. pct(player.damageMult),
+        "    Added damage: +" .. fmt(player.flatDamage),
+    }
+    table.insert(lines, "")
+    table.insert(lines, "Major upgrades")
+    for i = 1, MAX_MAJOR do
+        local m = player.majorUpgrades[i]
+        table.insert(lines, "    " .. i .. ". " .. (m and (m.pool .. " - " .. m.name) or "(empty)"))
+    end
+
+    for i, line in ipairs(lines) do
+        love.graphics.print(line, boxX + 24, boxY + 65 + (i - 1) * 20)
+    end
+
+    love.graphics.printf("Press Escape to resume", boxX, boxY + boxH - 35, boxW, "center")
+end
+
 function love.draw()
     --draw game over screen if player is dead
     if love.update == love.gameover then
@@ -462,27 +683,37 @@ function love.draw()
     cam:detach()
  
     -- Draw player
-    love.graphics.setColor(1, 1, 1, 1)
+    local flash = player.hitFlashTimer / HIT_FLASH_TIME
+    love.graphics.setColor(1, 1 - 0.8 * flash, 1 - 0.8 * flash, 1)
     wizardAnimation:draw(wizardImage, player.x, player.y, 0, 1.5, 1.5, 16, 16)
+    love.graphics.setColor(1, 1, 1, 1)
  
     -- Draw enemies
     for _, e in ipairs(enemies) do
+        local flash = e.hitFlash / HIT_FLASH_TIME
+        love.graphics.setColor(1, 1 - 0.8 * flash, 1 - 0.8 * flash, 1)
         e.animation:draw(cyborgImage, e.x, e.y, 0, 1.5, 1.5, 16, 16)
     end
+    love.graphics.setColor(1, 1, 1, 1)
  
     -- Draw bullets (yellow)
-    love.graphics.setColor(1, 1, 0)
+    love.graphics.setColor(1, 1, 1, 1)
     for _, b in ipairs(bullets) do
-        love.graphics.circle("fill", b.x, b.y, b.radius)
+        fireballAnimation:draw(fireballImage, b.x, b.y, b.angle, 1, 1, fireballW / 2, fireballH / 2)
     end
  
     -- Draw UI/text (black)
     love.graphics.setColor(0, 0, 0)
-    love.graphics.print("HP: " .. math.floor(math.max(0, player.hp)) .. " / " .. player.maxHp, 10, 10)
+    love.graphics.print("HP: " .. math.floor(math.max(0, player.hp)) .. " / " .. fmt(player.maxHp), 10, 10)
     love.graphics.print("Score: " .. score, 10, 30)
  
     -- Dialogue UI is drawn last so it sits on top of everything
     love.graphics.setColor(1, 1, 1, 1)
     narrator:draw()
+
+    --Draw pause menu if game is paused
+    if love.update == love.paused then
+        drawPauseMenu()
+    end
 end
  
