@@ -54,7 +54,7 @@ local GIANT_FIREBALL_SCALE = 2.5
 local GIANT_FIREBALL_RADIUS = 40
 local GIANT_FIREBALL_INTERVAL = 10       -- seconds between casts
 local CLOAK_REDUCTION = 0.5          -- extra damage reduction while the cloak is active
-local CLOAK_DAMAGE_PCT = 0.25        -- aura damage per second, as a fraction of magic power
+local CLOAK_DAMAGE_PCT = 1.5        -- aura damage per second, as a fraction of magic power
 local CLOAK_RADIUS = 90              -- how far the aura reaches (pixels)
 local CLOAK_EXPIRE_DELAY = 1         -- seconds the cloak lasts after the player is hit
 local CLOAK_RECAST_INTERVAL = 10     -- seconds until it returns after expiring
@@ -81,6 +81,13 @@ local ORBITAL_RADIUS = 75          -- blast radius (pixels)
 local ORBITAL_DAMAGE_PCT = 3.0     -- 3x attack power
 local ORBITAL_SPRITE_SCALE = 2     -- sprite scale
 local ORBITAL_BLAST_TIME = 0.2     -- how long the blast flash stays on screen
+local PLAGUE_COUNT = 3            -- enemies poisoned at once
+local PLAGUE_PCT = 0.5            -- per second, as a fraction of magic power and of physical power
+local PORTAL_RADIUS = 100         -- blast radius at the landing spot
+local PORTAL_DAMAGE_PCT = 1.5     -- 1.5x magic power
+local PORTAL_REDUCTION = 0.2      -- extra damage reduction after teleporting
+local PORTAL_BUFF_TIME = 1        -- seconds that reduction lasts
+local PORTAL_BLAST_TIME = 0.25    -- how long the blast flash stays on screen
 
 -- Enemies
 local BASE_SPAWNS_PER_SECOND = 2         -- same as the old 1 enemy per 0.5s
@@ -101,12 +108,14 @@ local PROJECTILES = {
     icicle = { stat = "magic", pct = 1.5 },
 }
 
--- Power stat * its own multiplier
+-- Power stat * its own multiplier. With Armored Bullets, armor counts as extra physical power.
 local function getPower(stat)
     if stat == "magic" then
         return player.magicPower * player.magicMult
     end
-    return player.attackPower * player.attackMult
+    local base = player.attackPower
+    if player.armoredBullets then base = base + player.defense end
+    return base * player.attackMult
 end
 --What a given projectile's damage deals right now
 local function getProjectileDamage(kind)
@@ -118,8 +127,19 @@ local function getDistance(x1, y1, x2, y2)
     return math.sqrt((x2 - x1)^2 + (y2 - y1)^2)
 end
 
--- Every enemy hit goes through here: damage, red flash, a floating number, and a kill removes them and scores.
--- stat is "magic" or "physical" and decides the number's colour.
+-- Poisons the closest unpoisoned enemy to a point. Returns false if there is none.
+local function poisonClosest(x, y)
+    local best, bestD = nil, math.huge
+    for _, e in ipairs(enemies) do
+        if not e.poisoned then
+            local d = getDistance(x, y, e.x, e.y)
+            if d < bestD then best, bestD = e, d end
+        end
+    end
+    if best then best.poisoned = true end
+    return best ~= nil
+end
+
 local function damageEnemy(index, amount, stat)
     local e = enemies[index]
     e.enemy_hp = e.enemy_hp - amount
@@ -136,6 +156,8 @@ local function damageEnemy(index, amount, stat)
     if e.enemy_hp <= 0 then
         table.remove(enemies, index)
         score = score + 1
+        -- the poison moves to the closest unpoisoned enemy
+        if e.poisoned and player.hasPlague then poisonClosest(e.x, e.y) end
     end
 end
 
@@ -148,10 +170,11 @@ local function updateDamageNumbers(dt)
     end
 end
 
--- Total damage reduction, including the cloak, capped at 95%
+-- Total damage reduction, including any temporary, capped at 95%
 local function getDamageReduction()
     local r = player.damageReduction
     if player.cloakActive then r = r + CLOAK_REDUCTION end
+    if player.portalBuffTimer > 0 then r = r + PORTAL_REDUCTION end
     return math.min(0.95, r)
 end
 
@@ -417,6 +440,65 @@ local function updateStrikes(dt)
     end
 end
 
+-- Spreading Plague: keep 3 enemies poisoned and damage them once per second
+local function updatePlague(dt)
+    if not player.hasPlague then return end
+
+    -- top up to PLAGUE_COUNT, choosing the enemies closest to the player
+    local count = 0
+    for _, e in ipairs(enemies) do
+        if e.poisoned then count = count + 1 end
+    end
+    while count < PLAGUE_COUNT do
+        if not poisonClosest(player.x, player.y) then break end
+        count = count + 1
+    end
+
+    player.plagueTimer = player.plagueTimer + dt
+    if player.plagueTimer < 1 then return end
+    player.plagueTimer = player.plagueTimer - 1
+
+    local hosts = {}
+    for _, e in ipairs(enemies) do
+        if e.poisoned then table.insert(hosts, e) end
+    end
+
+    local function hit(host, stat)
+        for i, e in ipairs(enemies) do
+            if e == host then
+                damageEnemy(i, getPower(stat) * PLAGUE_PCT, stat)
+                return
+            end
+        end
+    end
+
+    for _, host in ipairs(hosts) do
+        hit(host, "magic")     -- blue number
+        hit(host, "attack")    -- red number (skipped if the magic hit already killed it)
+    end
+end
+
+-- Portal Jump: blast around the landing spot
+local function portalBlast()
+    local damage = getPower("magic") * PORTAL_DAMAGE_PCT
+    for i = #enemies, 1, -1 do
+        local e = enemies[i]
+        if getDistance(player.x, player.y, e.x, e.y) < PORTAL_RADIUS + e.radius then
+            damageEnemy(i, damage, "magic")
+        end
+    end
+    player.portalBuffTimer = PORTAL_BUFF_TIME
+    table.insert(blasts, { x = player.x, y = player.y, radius = PORTAL_RADIUS,
+                           timer = PORTAL_BLAST_TIME, color = { 0.7, 0.4, 1 } })
+end
+
+local function updateBlasts(dt)
+    for i = #blasts, 1, -1 do
+        blasts[i].timer = blasts[i].timer - dt
+        if blasts[i].timer <= 0 then table.remove(blasts, i) end
+    end
+end
+
 --
 -- Upgrades -------------------------------------------------------------------
 --
@@ -524,10 +606,16 @@ local majorPools = {
           desc = "Conjure a cloak that reduces damage and deals magic damage to nearby enemies, lingering for 1 second after you take damage. Replenishes after 10 seconds." },
         { id = "mana_siphon", name = "Mana Siphon",
           text = "The magic around you begins to flow into you.",
-          desc = "Increase the rate at which you cast spells. Upgrades now also grant 2 magic power." },
+          desc = "Increase the rate at which you cast spells. Upgrades now also grant 1 magic power." },
         { id = "arcane_orbit", name = "Arcane Orbit",
           text = "Orbs of power circle you.",
           desc = "Conjure three orbs around you, dealing magic damage to enemies they touch." },
+        { id = "spreading_plague", name = "Spreading Plague",
+          text = "A sickly green mist clings to your hands.",
+          desc = "Poisons the 3 closest enemies, dealing magic and physical damage every second. When a poisoned enemy dies, the poison spreads to another enemy." },
+        { id = "portal_jump", name = "Portal Jump",
+          text = "Space folds open wherever you point.",
+          desc = "Your dash becomes a teleport that blasts enemies around where you land with magic damage. Gain damage reduction for a moment after teleporting." },
     }},
     { name = "Cybernetic", upgrades = {
         { id = "pulse_cannon",   name = "Pulse Cannon arm",  
@@ -545,6 +633,12 @@ local majorPools = {
         { id = "rapid_boots", name = "Rapid-fire Boots",
           text = "Your boots hum with restless energy.",
           desc = "Dash more often, and fire 2 bullets at the closest enemy when you dash." },
+        { id = "extra_arms", name = "Extra Arms",
+          text = "You wave your new appendages around.",
+          desc = "Deal 25% reduced damage. Your basic attack fires 2 additional bullets." },
+        { id = "reinforced_bullets", name = "Reinforced Bullets",
+          text = "You load in your new ammunition.",
+          desc = "Your physical power is increased by your armor." },
     }},
 }
 
@@ -603,6 +697,17 @@ local majorEffects = {
     orbital_strike = function()
         player.orbitalTimer = ORBITAL_INTERVAL
     end,
+    extra_arms = function()
+        addDamageMult(-0.25)
+    end,
+    reinforced_bullets = function()
+        player.armoredBullets = true
+    end,
+    spreading_plague = function()
+        player.hasPlague = true
+        player.plagueTimer = 0
+    end,
+    portal_jump = function() end,   -- no setup; the dash code checks for the upgrade
 }
 
 -- One random not-yet-owned upgrade from each pool
@@ -830,7 +935,7 @@ function love.keypressed(key)
                     local siphon = hasMajor("mana_siphon") and not inEnding
                     pendingUpgrade.apply()
                     pendingUpgrade = nil
-                    if siphon then addPower("magic", 2) end
+                    if siphon then addPower("magic", 1) end
                 end
                 ignoreDash = true
 
@@ -953,6 +1058,13 @@ function resetGame()
         orbitHits = {},   -- one table per orb, filled when the upgrade is picked
         -- Orbital Strike
         orbitalTimer = 0,
+        -- Armored Bullets
+        armoredBullets = false,
+        -- Spreading Plague
+        hasPlague = false,
+        plagueTimer = 0,
+        -- Portal Jump
+        portalBuffTimer = 0,
 
         -- Dash variables
         dashForce = 1200,    -- dash speed in pixels per second
@@ -972,6 +1084,7 @@ function resetGame()
     bullets = {}
     strikes = {}
     damageNumbers = {}
+    blasts = {}
  
     -- Timers for enemies
     enemySpawnTimer = 0
@@ -1063,6 +1176,10 @@ function love.gameplay(dt)
     updateCloak(dt)
     updateOrbit(dt)
     updateStrikes(dt)
+    updatePlague(dt)
+    updateBlasts(dt)
+    if player.portalBuffTimer > 0 then player.portalBuffTimer = player.portalBuffTimer - dt end
+    
     updateDamageNumbers(dt)
     
     -- Major upgrades at the scores in MAJOR_UPGRADE_SCORES (>= so a score jump can't skip one)
@@ -1127,11 +1244,21 @@ function love.gameplay(dt)
         local dist = math.sqrt(dx * dx + dy * dy)
 
         if dist > 1 then  -- ignore the dash if the cursor is right on top of the player
-            player.dashing = true
-            player.dashDirX = dx / dist
-            player.dashDirY = dy / dist
-            player.dashRemaining = math.min(dist, MAX_DASH_DISTANCE)
-            player.dashCooldown = player.dashDelay
+            local travel = math.min(dist, MAX_DASH_DISTANCE)
+            if hasMajor("portal_jump") then
+                -- teleport straight to the cursor (or the max distance toward it)
+                player.x = math.max(0, math.min(player.x + dx / dist * travel, screenWidth - player.radius))
+                player.y = math.max(0, math.min(player.y + dy / dist * travel, screenHeight - player.radius))
+                player.dashCooldown = player.dashDelay
+                portalBlast()
+                if hasMajor("rapid_boots") then fireBulletVolley() end
+            else
+                player.dashing = true
+                player.dashDirX = dx / dist
+                player.dashDirY = dy / dist
+                player.dashRemaining = travel
+                player.dashCooldown = player.dashDelay
+            end
         end
     end
 
@@ -1237,18 +1364,28 @@ function love.gameplay(dt)
  
         local aimAngle = math.atan2(mouseY - player.y, mouseX - player.x)
         local proj = PROJECTILES[player.weapon]
-        table.insert(bullets, {
-            kind = player.weapon,
-            x = player.x,
-            y = player.y,
-            dx = math.cos(aimAngle),
-            dy = math.sin(aimAngle),
-            angle = aimAngle,
-            speed = 400,
-            radius = 5,
-            stat = proj.stat,
-            damagePct = proj.pct,
-        })
+
+        -- Extra Arms: two more shots, 30 degrees to either side of the aim direction
+        local angles = { aimAngle }
+        if hasMajor("extra_arms") then
+            table.insert(angles, aimAngle - math.rad(30))
+            table.insert(angles, aimAngle + math.rad(30))
+        end
+
+        for _, a in ipairs(angles) do
+            table.insert(bullets, {
+                kind = player.weapon,
+                x = player.x,
+                y = player.y,
+                dx = math.cos(a),
+                dy = math.sin(a),
+                angle = a,
+                speed = 400,
+                radius = 5,
+                stat = proj.stat,
+                damagePct = proj.pct,
+            })
+        end
     end
 
     -- Giant fireball cast automatically every 10 seconds
@@ -1457,8 +1594,7 @@ function drawPauseMenu()
         "    Damage reduction: " .. pct(getDamageReduction()),
         "",
         "Damage",     
-        "    Physical power: " .. fmt(player.attackPower),
-        "    Magic power: " .. fmt(player.magicPower),
+        "    Physical power: " .. fmt(player.attackPower + (player.armoredBullets and player.defense or 0)),            "    Magic power: " .. fmt(player.magicPower),
         "    Physical multiplier: " .. pct(player.attackMult),
         "    Magic multiplier: " .. pct(player.magicMult),
         "    Attack speed: " .. pct(player.attackSpeed),
@@ -1550,7 +1686,9 @@ function love.draw()
     for _, e in ipairs(enemies) do
         local flash = e.hitFlash / HIT_FLASH_TIME
         local r, g, b = 1, 1, 1
-        if e.slowTimer > 0 then r, g, b = 0.35, 0.6, 1 end
+        if e.poisoned and e.slowTimer > 0 then r, g, b = 0.3, 0.9, 0.9        -- poisoned and slowed: teal
+        elseif e.poisoned then r, g, b = 0.5, 1, 0.5                          -- poisoned: green
+        elseif e.slowTimer > 0 then r, g, b = 0.35, 0.6, 1 end                -- slowed: blue
         love.graphics.setColor(r, g * (1 - 0.8 * flash), b * (1 - 0.8 * flash), 1)
         e.animation:draw(cyborgImage, e.x, e.y, 0, 1.5, 1.5, 16, 16)
     end
@@ -1585,6 +1723,15 @@ function love.draw()
             love.graphics.setColor(1, 1, 1, 1)
             bigHurtyAnimation:draw(bigHurtyImage, s.x, y, math.pi / 2, ORBITAL_SPRITE_SCALE, ORBITAL_SPRITE_SCALE, bigHurtyW / 2, bigHurtyH / 2)
         end
+    end
+    love.graphics.setColor(1, 1, 1, 1)
+
+    for _, bl in ipairs(blasts) do
+        local a = bl.timer / PORTAL_BLAST_TIME
+        love.graphics.setColor(bl.color[1], bl.color[2], bl.color[3], 0.35 * a)
+        love.graphics.circle("fill", bl.x, bl.y, bl.radius)
+        love.graphics.setColor(bl.color[1], bl.color[2], bl.color[3], 0.9 * a)
+        love.graphics.circle("line", bl.x, bl.y, bl.radius)
     end
     love.graphics.setColor(1, 1, 1, 1)
 
