@@ -12,12 +12,12 @@ You decide to put all of your wizarding knowledge together towards one final rit
 
 All in a moment, it returns, but not like it once was. You find that the world that you once knew has merged with a much darker one, a world of cruel technology and oppressive force. It's up to you to fix your mistake and possibly achieve the power you once seeked. 
 
-* [Set out to fix your mistake.]
+* [Set out to fix your mistake - Take the fireball wand]
     ~ origin = "wizard"
     You tighten your grip on your staff and step forward into the metallic wastes. The magic of the old world isn't dead yet.
     -> END
 
-* [Embrace the cruel technology.]
+* [Embrace the cruel technology - Take the bullet blaster]
     ~ origin = "cyber"
     Mistake? No, this is an opportunity. If you can combine your magic with these strange machines, ultimate power will finally be yours.
     -> END

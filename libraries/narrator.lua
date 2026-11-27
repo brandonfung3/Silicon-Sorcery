@@ -69,6 +69,7 @@ function narrator:init()
     Talkies.padding   = 12
     Talkies.rounding  = 4
     Talkies.thickness = 2
+    Talkies.height = 230
 
     -- Track which NPCs are currently bound so we can iterate them later.
     self._boundNPCs = {}
@@ -125,6 +126,7 @@ end
 
 --
 -- Running scripts ------------------------------------------------------------
+--
 
 --- Internal: pull the next batch of paragraphs+choices from the live story
 -- and push them into the Talkies queue.
@@ -153,12 +155,14 @@ function narrator:_pump(state)
         local choices = story:get_choices()
         local options = {}
         for i, choice in ipairs(choices) do
+            local color = state.colors and state.colors[choice.text]
             options[i] = {
                 choice.text,
                 function()
                     story:choose(i)
                     narrator:_pump(state)
                 end,
+                color,
             }
         end
         config.options = options
@@ -226,7 +230,7 @@ function narrator:startScript(npcOrScriptName, opts)
 
     if npc then npc.isTalking = true end
 
-    local state = { story = story, npc = npc, character = character }
+    local state = { story = story, npc = npc, character = character, colors = opts.colors }
     self:_pump(state)
 end
 

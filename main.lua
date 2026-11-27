@@ -42,13 +42,14 @@ local MAX_DASH_DISTANCE = 150
 local BASE_SHOOT_RATE = 0.5         -- seconds between shots
 local BASE_SPEED = 200
 
-local EARLY_UPGRADE_INTERVAL = 5     -- score between minor upgrades at the start
-local EARLY_UPGRADE_END_SCORE = 50   -- from this score on, the normal interval applies
-local BASE_UPGRADE_INTERVAL = 10         -- score between minor upgrades at the start
+local UPGRADE_INTERVAL_START = 5        -- score per upgrade at the start
+local UPGRADE_INTERVAL_MAX = 50         -- the interval never grows past this
+local UPGRADE_INTERVAL_STEP = 5         -- how much the interval grows each time
+local UPGRADES_PER_STEP = 4             -- upgrades taken before the interval grows
+local DOUBLE_UPGRADE_CHANCE = 0.05   -- chance per offered minor upgrade to be doubled
 
 local MAX_MAJOR = 4
-local MAJOR_UPGRADE_SCORES = { 50, 125, 225, 350 } --score for major upgrades 1, 2, and 3
-local UPGRADE_INTERVAL_GROWTH = 5        -- added every 100 score after 300
+local MAJOR_UPGRADE_SCORES = { 50, 150, 300, 500 } --score for major upgrades 1, 2, and 3
 local GIANT_FIREBALL_SCALE = 2.5
 local GIANT_FIREBALL_RADIUS = 40
 local GIANT_FIREBALL_INTERVAL = 10       -- seconds between casts
@@ -63,7 +64,7 @@ local ORBIT_RADIUS = 120            -- distance from the player (pixels)
 local ORBIT_SPEED = 2              -- radians per second
 local ORBIT_ORB_RADIUS = 24        -- hitbox size of each orb
 local ORBIT_SPRITE_SCALE = 1.5    -- placeholder sprite scale
-local ORBIT_DAMAGE_PCT = 2.0       -- 3x magic damage
+local ORBIT_DAMAGE_PCT = 2.0       -- 2x magic damage
 local ORBIT_HIT_COOLDOWN = 0.5     -- seconds before the same orb can hit the same enemy again
 local FROSTBITE_INTERVAL = 5       -- seconds between casts
 local ICICLE_COUNT = 7
@@ -73,6 +74,7 @@ local ICICLE_SCALE = 0.8
 local ICICLE_RADIUS = 12           -- hitbox
 local FROST_SLOW_MULT = 0.7        -- 30% slower
 local FROST_SLOW_DURATION = 2      -- seconds
+local ORBITAL_STRIKE_COUNT = 3     -- strikes per cast
 local ORBITAL_INTERVAL = 15        -- seconds between strikes at 100% attack speed
 local ORBITAL_FALL_TIME = 1.0      -- seconds from cast to impact
 local ORBITAL_RADIUS = 75          -- blast radius (pixels)
@@ -80,17 +82,22 @@ local ORBITAL_DAMAGE_PCT = 3.0     -- 3x attack power
 local ORBITAL_SPRITE_SCALE = 2     -- sprite scale
 local ORBITAL_BLAST_TIME = 0.2     -- how long the blast flash stays on screen
 
+-- Enemies
 local BASE_SPAWNS_PER_SECOND = 2         -- same as the old 1 enemy per 0.5s
 local SPAWN_RAMP_START_SCORE = 50        -- enemy spawn rate stays flat until 50 score
 local SPAWN_RATE_GROWTH = 0.01           -- extra spawns per second, gained every second
 local MAX_SPAWNS_PER_SECOND = 8          -- cap so it can't flood the screen
+local DAMAGE_NUMBER_TIME = 0.7     -- seconds a damage number stays on screen
+local DAMAGE_NUMBER_RISE = 40      -- pixels per second it floats upward
+local MAGIC_NUMBER_COLOR = { 0.4, 0.6, 1 }
+local PHYSICAL_NUMBER_COLOR = { 1, 0.3, 0.3 }
 
 -- Each projectile type: whcih power stat it scales with, and what % of player power it deals
 local PROJECTILES = {
     fireball = { stat = "magic", pct = 1.0 },
     bullet   = { stat = "attack", pct = 1.0 },
 
-    giant_fireball = { stat = "magic", pct = 3.0},
+    giant_fireball = { stat = "magic", pct = 2.0},
     icicle = { stat = "magic", pct = 1.5 },
 }
 
@@ -111,14 +118,33 @@ local function getDistance(x1, y1, x2, y2)
     return math.sqrt((x2 - x1)^2 + (y2 - y1)^2)
 end
 
--- Every enemy hit goes through here: damage, red flash, and a kill removes them and scores
-local function damageEnemy(index, amount)
+-- Every enemy hit goes through here: damage, red flash, a floating number, and a kill removes them and scores.
+-- stat is "magic" or "physical" and decides the number's colour.
+local function damageEnemy(index, amount, stat)
     local e = enemies[index]
     e.enemy_hp = e.enemy_hp - amount
     e.hitFlash = HIT_FLASH_TIME
+
+    table.insert(damageNumbers, {
+        x = e.x + math.random(-10, 10),
+        y = e.y - e.radius,
+        text = tostring(math.floor(amount)),
+        stat = stat,
+        timer = 0,
+    })
+
     if e.enemy_hp <= 0 then
         table.remove(enemies, index)
         score = score + 1
+    end
+end
+
+local function updateDamageNumbers(dt)
+    for i = #damageNumbers, 1, -1 do
+        local n = damageNumbers[i]
+        n.timer = n.timer + dt
+        n.y = n.y - DAMAGE_NUMBER_RISE * dt
+        if n.timer >= DAMAGE_NUMBER_TIME then table.remove(damageNumbers, i) end
     end
 end
 
@@ -129,11 +155,10 @@ local function getDamageReduction()
     return math.min(0.95, r)
 end
 
--- Gap to the next minor upgrade, based on the current score
-local function getUpgradeInterval(s)
-    if s < EARLY_UPGRADE_END_SCORE then return EARLY_UPGRADE_INTERVAL end
-    if s < 300 then return BASE_UPGRADE_INTERVAL end
-    return BASE_UPGRADE_INTERVAL + UPGRADE_INTERVAL_GROWTH * (math.floor(s / 100) - 2)
+-- Score needed for the next minor upgrade, based on how many have been taken
+local function getUpgradeInterval(upgradesTaken)
+    local steps = math.floor(upgradesTaken / UPGRADES_PER_STEP)
+    return math.min(UPGRADE_INTERVAL_MAX, UPGRADE_INTERVAL_START + UPGRADE_INTERVAL_STEP * steps)
 end
 
 -- Seconds between enemy spawns, shrinking as the game goes on. Capped at a minimum spawn interval.
@@ -249,7 +274,7 @@ local function updateCloak(dt)
             for i = #enemies, 1, -1 do
                 local e = enemies[i]
                 if getDistance(player.x, player.y, e.x, e.y) < CLOAK_RADIUS then
-                    damageEnemy(i, damage)
+                    damageEnemy(i, damage, "magic")
                 end
             end
         end
@@ -308,7 +333,7 @@ local function updateOrbit(dt)
             if not player.orbitHits[i][e]
                 and getDistance(orb.x, orb.y, e.x, e.y) < ORBIT_ORB_RADIUS + e.radius then
                 player.orbitHits[i][e] = ORBIT_HIT_COOLDOWN
-                damageEnemy(e_idx, damage)
+                damageEnemy(e_idx, damage, "magic")
             end
         end
     end
@@ -336,9 +361,36 @@ local function castIcicles(aimX, aimY)
     end
 end
 
--- Orbital Strike: mark a spot; the strike lands there after ORBITAL_FALL_TIME
-local function castOrbitalStrike(aimX, aimY)
-    table.insert(strikes, { x = aimX, y = aimY, timer = 0, landed = false, blastTimer = 0 })
+-- Orbital Strike: mark random spots; each strike lands after ORBITAL_FALL_TIME.
+-- No strike's center may sit inside another strike's radius (the radii can overlap).
+-- Casts one extra strike for every full 100% of attack speed above the base.
+local function castOrbitalStrike()
+    local extra = math.floor(math.max(0, player.attackSpeed - 1) + 1e-6)
+    local count = ORBITAL_STRIKE_COUNT + extra
+
+    local margin = ORBITAL_RADIUS   -- keeps the blast circle mostly on screen
+    local centers = {}
+
+    for _ = 1, count do
+        for _ = 1, 50 do   -- retry a limited number of times so it can never loop forever
+            local x = margin + math.random() * (screenWidth - 2 * margin)
+            local y = margin + math.random() * (screenHeight - 2 * margin)
+
+            local ok = true
+            for _, c in ipairs(centers) do
+                if getDistance(x, y, c.x, c.y) < ORBITAL_RADIUS then
+                    ok = false
+                    break
+                end
+            end
+
+            if ok then
+                table.insert(centers, { x = x, y = y })
+                table.insert(strikes, { x = x, y = y, timer = 0, landed = false, blastTimer = 0 })
+                break
+            end
+        end
+    end
 end
 
 local function updateStrikes(dt)
@@ -354,7 +406,7 @@ local function updateStrikes(dt)
                 for e_idx = #enemies, 1, -1 do
                     local e = enemies[e_idx]
                     if getDistance(s.x, s.y, e.x, e.y) < ORBITAL_RADIUS + e.radius then
-                        damageEnemy(e_idx, damage)
+                        damageEnemy(e_idx, damage, "physical")
                     end
                 end
             end
@@ -384,38 +436,16 @@ local function addDamageMult(amount)
     player.magicMult = roundTo(player.magicMult + amount, 3)
 end
 
-local CONVERT_MAJOR_COUNT = 4  -- majors from one pool needed to convert power
-local pendingConversion = nil  -- "magic" or "attack" once a conversion has happened, until its screen is shown
-local inConversion = false     -- true while the conversion screen is open
+local pendingEnding = false  -- true after the final major pick, until the ending screen is shown
+local inEnding = false       -- true while the ending screen is open
 
--- Adds to attack or magic power. After a conversion, all gains go to the surviving stat.
+-- Adds to attack or magic power.
 local function addPower(stat, amount)
-    if player.powerConversion == "toMagic" then stat = "magic"
-    elseif player.powerConversion == "toAttack" then stat = "attack" end
-
     if stat == "magic" then
         player.magicPower = roundTo(player.magicPower + amount, 1)
     else
         player.attackPower = roundTo(player.attackPower + amount, 1)
     end
-end
-
--- Moves all current power into one stat and grants +10% to that stat's multiplier
-local function convertPower(target)
-    if player.powerConversion ~= "none" then return end
-
-    if target == "magic" then
-        player.magicPower = roundTo(player.magicPower + player.attackPower, 1)
-        player.attackPower = 0
-        player.powerConversion = "toMagic"
-        player.magicMult = roundTo(player.magicMult + 0.10, 3)
-    else
-        player.attackPower = roundTo(player.attackPower + player.magicPower, 1)
-        player.magicPower = 0
-        player.powerConversion = "toAttack"
-        player.attackMult = roundTo(player.attackMult + 0.10, 3)
-    end
-    pendingConversion = target
 end
 
 --Formats a number with at most 1 decimal
@@ -427,50 +457,50 @@ end
 -- Add a new entry here and it automatically joins the random pool.
 -- Avoid [ ] { } | characters in label/text, since they become ink source.
 local upgradePool = {
-    { id = "max_hp", base = 20, decimals = 0,
+    { id = "max_hp", base = 30, decimals = 0,
       label = function(v) return "Vitality - +" .. fmt(v) .. " max HP" end,
       text = "Your body hardens against the wastes.",
       apply = function(v)
           player.maxHp = player.maxHp + v
           player.hp = math.min(player.maxHp, player.hp + v)
       end },
-    { id = "regen", base = 1,
+    { id = "regen", base = 1.5,
       label = function(v) return "Regeneration - +" .. fmt(v) .. " HP per second" end,
       text = "Your wounds begin to close on their own.",
       apply = function(v) player.regen = roundTo(player.regen + v, 1) end },
-    { id = "fire_rate", base = 10, decimals = 0,   -- percent
-      label = function(v) return "Quickened Spells - +" .. fmt(v) .. "% attack speed" end,
+    { id = "fire_rate", base = 15, decimals = 0,   -- percent
+      label = function(v) return "Firing rate - +" .. fmt(v) .. "% attack speed" end,
       text = "Your staff hums with eager energy.",
       apply = function(v) player.attackSpeed = roundTo(player.attackSpeed + v / 100, 2) end },
-    { id = "defense", base = 2,
+    { id = "defense", base = 3,
       label = function(v) return "Warding - +" .. fmt(v) .. " armor" end,
       text = "A faint barrier shimmers around you.",
       apply = function(v) player.defense = roundTo(player.defense + v, 1) end },
-    { id = "attack_power", base = 2,
-      label = function(v) return "Hardened Rounds - +" .. fmt(v) .. " attack power" end,
+    { id = "attack_power", base = 3,
+      label = function(v) return "Hardened Rounds - +" .. fmt(v) .. " physical power" end,
       text = "Your ammunition hits like a hammer.",
       apply = function(v) addPower("attack", v) end },    
-    { id = "magic_power", base = 2,
+    { id = "magic_power", base = 3,
       label = function(v) return "Arcane Might - +" .. fmt(v) .. " magic power" end,
       text = "Raw magic surges through you.",
       apply = function(v) addPower("magic", v) end },    
-    { id = "all_power", base = 1.5,
-      label = function(v) return "Balanced Might - +" .. fmt(v) .. " attack and magic power" end,
+    { id = "all_power", base = 2.25,
+      label = function(v) return "Balanced Might - +" .. fmt(v) .. " physical and magic power" end,
       text = "Steel and sorcery rise together.",
       apply = function(v)
         addPower("attack", v)
         addPower("magic", v)
     end },
-    { id = "speed", base = 10, decimals = 0,       -- percent
+    { id = "speed", base = 15, decimals = 0,       -- percent
       label = function(v) return "Fleet of Foot - +" .. fmt(v) .. "% move speed" end,
       text = "The ground slips away beneath your boots.",
       apply = function(v) player.speed = player.speed + v / 100 * BASE_SPEED end },
-    --rare 1% chance upgrades
-      { id = "damage_mult", base = 5, rare = 0.03,
-      label = function(v) return "Overwhelming Force - +" .. fmt(v) .. "% damage" end,
+    --rare 3% chance upgrades
+      { id = "damage_mult", base = 7, rare = 0.03,
+      label = function(v) return "Overwhelming Force - +" .. fmt(v) .. "% damage multiplier" end,
       text = "Every strike lands harder than it should.",
       apply = function(v) addDamageMult(v / 100) end },
-    { id = "damage_reduction", base = 5, rare = 0.03,
+    { id = "damage_reduction", base = 7, rare = 0.03,
       label = function(v) return "Aegis - +" .. fmt(v) .. "% damage reduction" end,
       text = "Blows seem to glance off you.",
       apply = function(v) player.damageReduction = math.min(0.95, roundTo(player.damageReduction + v / 100, 3)) end },
@@ -491,30 +521,30 @@ local majorPools = {
           desc = "Every 10 seconds, cast a giant fireball that pierces enemies and bursts into a ring of fireballs" },
         { id = "celestial_cloak", name = "Celestial Cloak",
           text = "Starlight settles over your shoulders.",
-          desc = "Gain a cloak that grants 50% damage reduction and deals 25% of your magic power each second to nearby enemies. It fades 1 second after you take damage and is recast after 10 seconds." },
+          desc = "Conjure a cloak that reduces damage and deals magic damage to nearby enemies, lingering for 1 second after you take damage. Replenishes after 10 seconds." },
         { id = "mana_siphon", name = "Mana Siphon",
           text = "The magic around you begins to flow into you.",
-          desc = "Your spell casting speed has increased. Upgrades now also grant 1 magic power." },
+          desc = "Increase the rate at which you cast spells. Upgrades now also grant 2 magic power." },
         { id = "arcane_orbit", name = "Arcane Orbit",
           text = "Orbs of power circle you.",
-          desc = "Three orbs circle you, dealing triple your magic power to enemies they touch." },
+          desc = "Conjure three orbs around you, dealing magic damage to enemies they touch." },
     }},
     { name = "Cybernetic", upgrades = {
         { id = "pulse_cannon",   name = "Pulse Cannon arm",  
           text = "Your arm whirs and splits into a cannon.",
-          desc = "Deal 25% reduced damage. Bullets that hit an enemy split into 2 fireballs" },
+          desc = "Deal 25% reduced damage. Bullets that hit an enemy split into 2 fireballs. Swap your primary weapon is now the blaster" },
         { id = "titanium_bio",   name = "Titanium Bioskeleton", 
           text = "Metal laces through your bones.",
-          desc = "You now take less damage and have more health, and your attack power has increased significantly." },
+          desc = "Take less damage and gain health and physical power." },
         { id = "orbital_strike", name = "Orbital Strike Uplink",
           text = "Somewhere above, a satellite wakes.",
-          desc = "Periodically call a massive strike, dealing triple your attack power to enemies in the blast. You can call strikes faster with attack speed." },        
+          desc = "Periodically calls down random strikes, dealing large physical damage to enemies in the blasts. Attack speed increases the rate and number of strikes." },        
         { id = "overclocked_servos", name = "Overclocked Servos",
           text = "Your joints whine as the limiters come off.",
-          desc = "Your attack and movement speed have increased significantly." },
+          desc = "Dramatically increase your attack and movement speed." },
         { id = "rapid_boots", name = "Rapid-fire Boots",
           text = "Your boots hum with restless energy.",
-          desc = "You can now dash more frequently, and your dashes now fire 2 bullets at the closest enemy." },
+          desc = "Dash more often, and fire 2 bullets at the closest enemy when you dash." },
     }},
 }
 
@@ -587,9 +617,8 @@ local function pickMajorUpgrades()
             local u = available[math.random(#available)]
             table.insert(choices, {
                 id = u.id,
-                label = pool.name .. " - " .. u.name,
+                label = u.name .. (u.desc and (" - " .. u.desc) or ""),
                 text = u.text,
-                desc = u.desc,
                 apply = function()
                     table.insert(player.majorUpgrades, { id = u.id, name = u.name, pool = pool.name })
                     -- The first major upgrade decides the player's look
@@ -603,13 +632,9 @@ local function pickMajorUpgrades()
                         player.magicMult = roundTo(player.magicMult + 0.05, 3)
                     end
                     if majorEffects[u.id] then majorEffects[u.id](#player.majorUpgrades) end
-                    -- Four majors from one pool converts all power into that pool's stat
-                    local count = 0
-                    for _, m in ipairs(player.majorUpgrades) do
-                        if m.pool == pool.name then count = count + 1 end
-                    end
-                    if count >= CONVERT_MAJOR_COUNT then
-                        convertPower(pool.name == "Wizard" and "magic" or "attack")
+                    -- After the final major upgrade, show the ending text
+                    if #player.majorUpgrades >= MAX_MAJOR then
+                        pendingEnding = true
                     end
                 end,
             })
@@ -649,10 +674,24 @@ local function pickUpgrades(n)
     local picked = {}
     for _, u in ipairs(chosen) do
         local value = roundTo(u.base * rollMultiplier(), u.decimals or 1)
+
+        -- 1% chance to double the upgrade
+        local doubled = math.random() < DOUBLE_UPGRADE_CHANCE
+        if doubled then value = roundTo(value * 2, u.decimals or 1) end
+
+        -- golden wins over light blue, even for a rare upgrade
+        local color = nil
+        if doubled then
+            color = { 1, 0.82, 0.2 }
+        elseif u.rare then
+            color = { 0.55, 0.8, 1 }
+        end
+
         table.insert(picked, {
             id = u.id,
             label = u.label(value),
             text = u.text,
+            color = color,
             apply = function() u.apply(value) end,
         })
     end
@@ -682,12 +721,16 @@ end
  
 local function startUpgrade(choices, intro)
     pendingUpgrade = nil
- 
-    local byId = {}
-    for _, u in ipairs(choices) do byId[u.id] = u end
- 
+
+    local byId, colors = {}, {}
+    for _, u in ipairs(choices) do
+        byId[u.id] = u
+        if u.color then colors[u.label] = u.color end
+    end
+
     narrator:startScript("upgrade", {
         content = buildUpgradeScript(choices, intro),
+        colors = colors,
         observe = {
             upgrade = function(value)
                 if value and value ~= "" then pendingUpgrade = byId[value] end
@@ -696,39 +739,39 @@ local function startUpgrade(choices, intro)
     })
     love.update = love.upgrade
 end
--- Shown after a mono-pool conversion: story, an explanation of the new power stats, and a weapon choice
-local function startConversionScript(target)
-    local toMagic = (target == "magic")
 
-    local intro
-    if toMagic then
-        intro = table.concat({
-            "TEXT ABOUT GIVING UP CYBERNETICS",
-            "You have forsaken cybernetics.",
-            "All of your current and future attack power has been converted into magic power. Your magic multiplier rises by 10 percent.",
-            "Your attack power is now zero. Bullets and every other weapon of the machines will deal no damage.",
-            "Your old wand glows faintly beside you, waiting.",
-        }, "\n")
-    else
-        intro = table.concat({
-            "TEXT ABOUT GIVING UP WIZARDRY",
-            "You have forsaken wizardry.",
-            "All of your current and future magic power has been converted into attack power. Your attack multiplier rises by 10 percent.",
-            "Your magic power is now zero. Your spells will deal no damage.",
-            "A gun lies half buried in the rubble nearby, built for hands like yours.",
-        }, "\n")
+-- Shown after the final major upgrade; the text depends on which pools the player chose from
+local function startEndingScript()
+    local wizards, cybers = 0, 0
+    for _, m in ipairs(player.majorUpgrades) do
+        if m.pool == "Wizard" then wizards = wizards + 1 else cybers = cybers + 1 end
     end
 
-    local choices = {
-    {
-        id = "continue",
-        label = "Continue",
-        text = "You press on, changed.",
-        apply = function() end,
-    },
-}
-    inConversion = true
-    startUpgrade(choices, intro)
+    local text
+    if wizards >= MAX_MAJOR then
+        text = {
+            "TEXT FOR FOUR WIZARDRY UPGRADES",
+            "You walked the old path to its end, and the magic answered every time.",
+            "The machines have never seen anything like you.",
+        }
+    elseif cybers >= MAX_MAJOR then
+        text = {
+            "TEXT FOR FOUR CYBERNETIC UPGRADES",
+            "You gave yourself to the machines piece by piece, and they took everything you offered.",
+            "There is very little left of the wizard.",
+        }
+    else
+        text = {
+            "TEXT FOR A MIX OF WIZARDRY AND CYBERNETICS",
+            "Spell and circuit, ritual and code. You belong to neither world and both.",
+            "Perhaps that is the power you were looking for.",
+        }
+    end
+
+    inEnding = true
+    startUpgrade({
+        { id = "continue", label = "Continue", text = "You press on, changed.", apply = function() end },
+    }, table.concat(text, "\n"))
 end
  
 --
@@ -739,15 +782,25 @@ function love.keypressed(key)
     --Game over: Enter returns to the main menu
     if love.update == love.gameover then
         if key == "return" or key == "kpenter" then
+            startGame()
+        end
+        return
+    end
+
+    -- Tutorial: close it and return to the main menu
+    if love.update == love.tutorial then
+        if key == "escape" or key == "return" or key == "kpenter" or key == "t" then
             love.update = love.menu
         end
         return
     end
 
-    -- Main menu: Enter starts the game
+    -- Main menu: Enter starts the game, T opens the tutorial
     if love.update == love.menu then
         if key == "return" or key == "kpenter" then
             startGame()
+        elseif key == "t" then
+            love.update = love.tutorial
         end
         return
     end
@@ -774,21 +827,20 @@ function love.keypressed(key)
             if love.update == love.upgrade then
                 if pendingUpgrade then
                     -- checked first, and skipped on the conversion screen, so neither pays out Mana Siphon
-                    local siphon = hasMajor("mana_siphon") and not inConversion
+                    local siphon = hasMajor("mana_siphon") and not inEnding
                     pendingUpgrade.apply()
                     pendingUpgrade = nil
-                    if siphon then addPower("magic", 1) end
+                    if siphon then addPower("magic", 2) end
                 end
                 ignoreDash = true
 
-                -- A conversion just happened: show its screen before returning to the game
-                if pendingConversion and not inConversion then
-                    local target = pendingConversion
-                    pendingConversion = nil
-                    startConversionScript(target)
+                -- The last major upgrade was just picked: show the ending text before returning to the game
+                if pendingEnding and not inEnding then
+                    pendingEnding = false
+                    startEndingScript()
                     return
                 end
-                inConversion = false
+                inEnding = false
             end
             love.update = love.gameplay
         end
@@ -842,9 +894,12 @@ function love.load()
     giantFireballImage, giantFireballAnimation, giantFireballW, giantFireballH = loadFireball("sprites/giant_fireball.png", 0.1)
     bigHurtyImage, bigHurtyAnimation, bigHurtyW, bigHurtyH = loadThreeFrameSheet("sprites/big_hurty.png", 0.1)
     background = love.graphics.newImage("sprites/background.png")
+
     defaultFont = love.graphics.getFont()
     menuFont = love.graphics.newFont(24)
     hudFont = love.graphics.newFont(24)
+    damageFont = love.graphics.newFont(14)
+    tutorialFont = love.graphics.newFont(14)
 
     narrator:init()
 
@@ -861,12 +916,12 @@ function resetGame()
         rotation = 0,
         speed = 200,
         radius = 16,
-        hp = 100,                   -- current HP
-        maxHp = 100,
+        hp = 150,                   -- current HP
+        maxHp = 150,
         regen = 0,                  -- HP per second
         defense = 0,                -- flat reduction from upgrades
-        attackPower = 5,            -- flat attack added from upgrades
-        magicPower = 5,             -- flat magic added from upgrades
+        attackPower = 10,            -- flat attack added from upgrades
+        magicPower = 10,             -- flat magic added from upgrades
         attackMult = 1.0,  -- 1.0 = 100%; scales attack power (bullets)
         magicMult = 1.0,   -- 1.0 = 100%; scales magic power (fireballs, cloak) and magic power
         damageReduction = 0,        -- 0 = 0% damage reduction
@@ -875,9 +930,12 @@ function resetGame()
 
         hitFlashTimer = 0,          -- Time left for hit flash effect
         invulnTimer = 0,            -- Time left before player can be hit again (after taking damage)
- 
+        -- EXP BAR
+        barStart = 0,               -- score at which the last upgrade happened
+
         --Upgrade variables
-        nextUpgradeScore = EARLY_UPGRADE_INTERVAL,  -- score needed for the next minor upgrade
+        minorUpgradeCount = 0,
+        nextUpgradeScore = UPGRADE_INTERVAL_START,  -- score needed for the next minor upgrade
         nextMajorIndex = 1,         -- which entry of MAJOR_UPGRADE_SCORES comes next
         majorUpgrades = {},         -- list of major upgrades the player has chosen
         giantFireballTimer = 0,     -- timer for casting giant fireball if the player has that major upgrade
@@ -889,7 +947,6 @@ function resetGame()
         cloakExpiring = false,      -- true once the player has been hit while it was active
         cloakExpireTimer = 0,
         cloakRecastTimer = 0,
-        powerConversion = "none",   -- "none", "toMagic" or "toAttack"
         -- Arcane Orbit
         hasOrbit = false,
         orbitAngle = 0,
@@ -914,6 +971,7 @@ function resetGame()
     enemies = {}
     bullets = {}
     strikes = {}
+    damageNumbers = {}
  
     -- Timers for enemies
     enemySpawnTimer = 0
@@ -923,8 +981,8 @@ function resetGame()
  
     score = 0
     pendingUpgrade = nil
-    pendingConversion = nil
-    inConversion = false
+    pendingEnding = false
+    inEnding = false
     ignoreDash = false
 end
  
@@ -939,6 +997,10 @@ end
 
 function love.menu(dt)
     -- Menu input is handled in love.keypressed
+end
+
+function love.tutorial(dt)
+    -- Tutorial input is handled in love.keypressed
 end
 
 function love.gameover(dt)
@@ -1000,14 +1062,8 @@ function love.gameplay(dt)
 
     updateCloak(dt)
     updateOrbit(dt)
-    -- Orbital Strike: call down a strike every 15 seconds (sooner with attack speed)
-    if hasMajor("orbital_strike") then
-        player.orbitalTimer = player.orbitalTimer + dt
-        if player.orbitalTimer >= ORBITAL_INTERVAL / player.attackSpeed then
-            player.orbitalTimer = 0
-            castOrbitalStrike(mouseX, mouseY)
-        end
-    end
+    updateStrikes(dt)
+    updateDamageNumbers(dt)
     
     -- Major upgrades at the scores in MAJOR_UPGRADE_SCORES (>= so a score jump can't skip one)
     local majorScore = MAJOR_UPGRADE_SCORES[player.nextMajorIndex]
@@ -1023,9 +1079,11 @@ function love.gameplay(dt)
         end
     end
 
-    -- minor upgrade after every 15 score
+    --minor upgrades
     if score >= player.nextUpgradeScore then
-        player.nextUpgradeScore = score + getUpgradeInterval(score)
+        player.minorUpgradeCount = player.minorUpgradeCount + 1
+        player.nextUpgradeScore = score + getUpgradeInterval(player.minorUpgradeCount)
+        player.barStart = score
         startUpgrade(pickUpgrades(3), "Power surges through you. Choose your boon.")
         return
     end
@@ -1122,7 +1180,7 @@ function love.gameplay(dt)
         local newEnemy = {
             x = spawnX,
             y = spawnY,
-            enemy_hp = 10 + math.max(0, math.floor((score - 30)/ 10)),  -- enemy hp grows with score
+            enemy_hp = 15 + math.max(0, math.floor((score - 25) / 10)),  -- enemy hp grows with score
             damage = 10 + math.max(0, math.floor((score - 50) / 25)),   -- enemy damage grows with score
             speed = 150,
             radius = 16,
@@ -1210,6 +1268,15 @@ function love.gameplay(dt)
             castIcicles(mouseX, mouseY)
         end
     end
+
+    -- Orbital Strike: call down a strike every 15 seconds (sooner with attack speed)
+    if hasMajor("orbital_strike") then
+        player.orbitalTimer = player.orbitalTimer + dt
+        if player.orbitalTimer >= ORBITAL_INTERVAL / player.attackSpeed then
+            player.orbitalTimer = 0
+            castOrbitalStrike()
+        end
+    end
  
     -- Movement of bullets + enemy collision
     for b_idx = #bullets, 1, -1 do
@@ -1228,7 +1295,7 @@ function love.gameplay(dt)
                 if not b.hitEnemies[e]
                     and getDistance(b.x, b.y, e.x, e.y) < b.radius + e.radius then
                     b.hitEnemies[e] = true
-                    damageEnemy(e_idx, getProjectileDamage(b))
+                    damageEnemy(e_idx, getProjectileDamage(b), b.stat)
                 end
             end
 
@@ -1264,7 +1331,7 @@ function love.gameplay(dt)
                             e.slowTimer = FROST_SLOW_DURATION
                         end
 
-                        damageEnemy(e_idx, getProjectileDamage(b))
+                        damageEnemy(e_idx, getProjectileDamage(b), b.stat)
                         hit = true
                         break
                     end
@@ -1295,7 +1362,70 @@ local function drawMenu()
         screenHeight / background:getHeight())
     love.graphics.setFont(menuFont)
     printShadowed("Press Enter to start", screenHeight - 70)
+    printShadowed("Press T for tutorial", screenHeight - 35)
     love.graphics.setFont(defaultFont)
+end
+
+local function drawTutorial()
+    love.graphics.setColor(1, 1, 1, 1)
+    love.graphics.draw(background, 0, 0, 0,
+        screenWidth / background:getWidth(),
+        screenHeight / background:getHeight())
+    love.graphics.setColor(0, 0, 0, 0.82)
+    love.graphics.rectangle("fill", 30, 20, screenWidth - 60, screenHeight - 40, 8, 8)
+
+    local x, w = 55, screenWidth - 110
+    local y = 25
+
+    love.graphics.setColor(1, 1, 1, 1)
+    love.graphics.setFont(menuFont)
+    love.graphics.printf("TUTORIAL", 0, y, screenWidth, "center")
+    y = y + 42
+    love.graphics.setFont(tutorialFont)
+
+    local function heading(text)
+        love.graphics.setColor(0.6, 0.85, 1, 1)
+        love.graphics.print(text, x, y)
+        y = y + tutorialFont:getHeight() + 4
+    end
+
+    local function entry(name, desc)
+        local _, lines = tutorialFont:getWrap(name .. ": " .. desc, w)
+        love.graphics.setColor(1, 1, 1, 1)
+        love.graphics.printf({ { 1, 0.85, 0.4 }, name .. ": ", { 1, 1, 1 }, desc }, x, y, w, "left")
+        y = y + tutorialFont:getHeight() * #lines + 4
+    end
+
+    heading("CONTROLS")
+    entry("Move", "WASD or the arrow keys.")
+    entry("Aim and attack", "Aim with the mouse. You attack automatically toward your cursor.")
+    entry("Dash", "Space dashes toward your cursor, stopping there if it is close. It has a short cooldown.")
+    entry("Pause", "Escape or E pauses the game and shows your stats and major upgrades.")
+    entry("Dialogue", "Space or Enter continues. Up and Down to change selection.")
+
+    y = y + 8
+    heading("UPGRADES")
+    entry("Experience bar", "The green bar at the bottom fills as you defeat enemies. When it fills, you gain a choice of 3 upgrades.")
+    entry("Ascensions", "After defeating enough enemies, ascend - choosing between a Wizard and a Cybernetic upgrade that changes how you fight.")
+
+    y = y + 8
+    heading("STATS")
+    entry("Health", "How much damage you can take. You lose when it reaches 0.")
+    entry("Health regen", "Restore health every second.")
+    entry("Speed", "How fast you move.")
+    entry("Armor", "Flat damage removed from every hit you take, after applying damage reduction. Cannot reduce damage below 1.")
+    entry("Damage reduction", "Percent of incoming damage ignored, before applying armor. Damage reduction cannot exceed 95%.")
+    entry("Physical power", "The base damage of physical attacks, such as bullets and many other cybernetic weapons.")
+    entry("Magic power", "The base damage of magic attacks, such as fireballs and many other wizard spells.")
+    entry("Physical and magic multipliers", "A percent bonus applied to that type of power.")
+    entry("Attack speed", "How fast you fire your basic attack.")
+    entry("Cast speed", "How fast your timed spells recharge.")
+
+    love.graphics.setColor(1, 1, 1, 0.8)
+    love.graphics.printf("Press Escape to return", 0, screenHeight - 40, screenWidth, "center")
+
+    love.graphics.setFont(defaultFont)
+    love.graphics.setColor(1, 1, 1, 1)
 end
 
 function drawPauseMenu()
@@ -1327,9 +1457,9 @@ function drawPauseMenu()
         "    Damage reduction: " .. pct(getDamageReduction()),
         "",
         "Damage",     
-        "    Attack power: " .. fmt(player.attackPower),
+        "    Physical power: " .. fmt(player.attackPower),
         "    Magic power: " .. fmt(player.magicPower),
-        "    Attack multiplier: " .. pct(player.attackMult),
+        "    Physical multiplier: " .. pct(player.attackMult),
         "    Magic multiplier: " .. pct(player.magicMult),
         "    Attack speed: " .. pct(player.attackSpeed),
         "    Cast speed: " .. pct(player.castSpeed), 
@@ -1364,6 +1494,11 @@ function love.draw()
     --draw main menu if in main menu state
     if love.update == love.menu then
         drawMenu()
+        return
+    end
+    -- draw tutorial if in tutorial state
+    if love.update == love.tutorial then
+        drawTutorial()
         return
     end
  
@@ -1452,13 +1587,45 @@ function love.draw()
         end
     end
     love.graphics.setColor(1, 1, 1, 1)
+
+    -- Floating damage numbers (blue for magic, red for physical)
+    love.graphics.setFont(damageFont)
+    for _, n in ipairs(damageNumbers) do
+        local alpha = 1 - (n.timer / DAMAGE_NUMBER_TIME)
+        local c = (n.stat == "magic") and MAGIC_NUMBER_COLOR or PHYSICAL_NUMBER_COLOR
+        love.graphics.setColor(0, 0, 0, alpha * 0.8)              -- shadow, so the number reads on any background
+        love.graphics.print(n.text, n.x + 1, n.y + 1)
+        love.graphics.setColor(c[1], c[2], c[3], alpha)
+        love.graphics.print(n.text, n.x, n.y)
+    end
+    love.graphics.setFont(defaultFont)
+    love.graphics.setColor(1, 1, 1, 1)
  
     -- Draw UI/text (black)
     love.graphics.setFont(hudFont)
     love.graphics.setColor(0, 0, 0)
     love.graphics.print("HP: " .. math.floor(math.max(0, player.hp)) .. " / " .. fmt(player.maxHp), 10, 10)
-    love.graphics.print("Score: " .. score, 10, 42)
+    love.graphics.print("Kills: " .. score, 10, 42)
     love.graphics.setFont(defaultFont)
+
+    -- Experience bar along the bottom of the screen (fills toward the next minor upgrade)
+    do
+        local barX, barH = 10, 18
+        local barW = screenWidth - 20
+        local barY = screenHeight - barH - 10
+
+        local from = player.barStart
+        local to = player.nextUpgradeScore
+        local frac = (to > from) and math.max(0, math.min(1, (score - from) / (to - from))) or 0
+
+        love.graphics.setColor(0, 0, 0, 0.6)                  -- background
+        love.graphics.rectangle("fill", barX, barY, barW, barH, 4, 4)
+        love.graphics.setColor(0.3, 0.85, 0.35, 1)            -- green fill
+        love.graphics.rectangle("fill", barX, barY, barW * frac, barH, 4, 4)
+        love.graphics.setColor(1, 1, 1, 0.8)                  -- outline
+        love.graphics.rectangle("line", barX, barY, barW, barH, 4, 4)
+    end
+    love.graphics.setColor(1, 1, 1, 1)
  
     -- Dialogue UI is drawn last so it sits on top of everything
     love.graphics.setColor(1, 1, 1, 1)

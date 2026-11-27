@@ -355,13 +355,22 @@ function Talkies.draw()
     if currentDialog.inlineOptions then
       local optionsY = textY + currentDialog.font:getHeight() * #modmsg
       local optionLeftPad = currentDialog.font:getWidth(currentDialog.optionCharacter.." ")
-      for k, option in pairs(currentDialog.options) do
-        love.graphics.print(option[1], optionLeftPad+textX+currentDialog.padding, optionsY+((k-1)*currentDialog.fontHeight))
+      local optionX = optionLeftPad + textX + currentDialog.padding
+      local optionW = textW - optionLeftPad - currentDialog.padding
+
+      -- Stack the options by their wrapped height so long ones don't overlap the next
+      local y, selectedY = optionsY, optionsY
+      for k, option in ipairs(currentDialog.options) do
+        local _, wrapped = currentDialog.font:getWrap(option[1], optionW)
+        if k == currentDialog.optionIndex then selectedY = y end
+        love.graphics.setColor(option[3] or currentDialog.messageColor)   -- golden if the option has a colour
+        love.graphics.printf(option[1], optionX, y, optionW, "left")
+        y = y + currentDialog.fontHeight * #wrapped
       end
-      love.graphics.print(
-        currentDialog.optionCharacter.." ",
-        textX+currentDialog.padding,
-        optionsY+((currentDialog.optionIndex-1)*currentDialog.fontHeight))
+
+      love.graphics.setColor(currentDialog.messageColor)
+      love.graphics.print(currentDialog.optionCharacter.." ", textX+currentDialog.padding, selectedY)
+
     else
       local optionWidth = 0
       
