@@ -81,8 +81,8 @@ local ORBITAL_RADIUS = 75          -- blast radius (pixels)
 local ORBITAL_DAMAGE_PCT = 3.0     -- 3x attack power
 local ORBITAL_SPRITE_SCALE = 2     -- sprite scale
 local ORBITAL_BLAST_TIME = 0.2     -- how long the blast flash stays on screen
-local PLAGUE_COUNT = 3            -- enemies poisoned at once
-local PLAGUE_PCT = 0.5            -- per second, as a fraction of magic power and of physical power
+local PLAGUE_COUNT = 5            -- enemies poisoned at once
+local PLAGUE_PCT = 0.3            -- per second, as a fraction of magic power and of physical power
 local PORTAL_RADIUS = 100         -- blast radius at the landing spot
 local PORTAL_DAMAGE_PCT = 1.5     -- 1.5x magic power
 local PORTAL_REDUCTION = 0.2      -- extra damage reduction after teleporting
@@ -440,7 +440,7 @@ local function updateStrikes(dt)
     end
 end
 
--- Spreading Plague: keep 3 enemies poisoned and damage them once per second
+-- Spreading Plague: keep 5 enemies poisoned and damage them once per second
 local function updatePlague(dt)
     if not player.hasPlague then return end
 
@@ -454,7 +454,7 @@ local function updatePlague(dt)
         count = count + 1
     end
 
-    player.plagueTimer = player.plagueTimer + dt
+    player.plagueTimer = player.plagueTimer + dt * player.castSpeed
     if player.plagueTimer < 1 then return end
     player.plagueTimer = player.plagueTimer - 1
 
@@ -612,10 +612,10 @@ local majorPools = {
           desc = "Conjure three orbs around you, dealing magic damage to enemies they touch." },
         { id = "spreading_plague", name = "Spreading Plague",
           text = "A sickly green mist clings to your hands.",
-          desc = "Poisons the 3 closest enemies, dealing magic and physical damage every second. When a poisoned enemy dies, the poison spreads to another enemy." },
+          desc = "Poisons the 5 closest enemies, dealing magic and physical damage over time. When a poisoned enemy dies, the poison spreads to another enemy." },
         { id = "portal_jump", name = "Portal Jump",
           text = "Space folds open wherever you point.",
-          desc = "Your dash becomes a teleport that blasts enemies around where you land with magic damage. Gain damage reduction for a moment after teleporting." },
+          desc = "Your dash becomes a teleport spell that blasts enemies around where you land with magic damage. Gain damage reduction for a moment after teleporting." },
     }},
     { name = "Cybernetic", upgrades = {
         { id = "pulse_cannon",   name = "Pulse Cannon arm",  
@@ -635,10 +635,10 @@ local majorPools = {
           desc = "Dash more often, and fire 2 bullets at the closest enemy when you dash." },
         { id = "extra_arms", name = "Extra Arms",
           text = "You wave your new appendages around.",
-          desc = "Deal 25% reduced damage. Your basic attack fires 2 additional bullets." },
+          desc = "Deal 25% reduced damage. Your basic attack fires 2 additional projectiles." },
         { id = "reinforced_bullets", name = "Reinforced Bullets",
           text = "You load in your new ammunition.",
-          desc = "Your physical power is increased by your armor." },
+          desc = "Your physical power is increased by your armor. Gain 15 Armor." },
     }},
 }
 
@@ -661,8 +661,8 @@ local majorEffects = {
         -- +30% damage reduction, capped at 95%
         player.damageReduction = math.min(0.95, roundTo(player.damageReduction + 0.30, 3))
         -- +25 max HP
-        player.maxHp = player.maxHp + 25
-        player.hp = math.min(player.maxHp, player.hp + 25)
+        player.maxHp = player.maxHp + 50
+        player.hp = math.min(player.maxHp, player.hp + 50)
         -- Attack power scales with when the upgrade was picked
         addPower("attack", 10 * order)
     end,
@@ -702,6 +702,7 @@ local majorEffects = {
     end,
     reinforced_bullets = function()
         player.armoredBullets = true
+        player.defense = player.defense + 15
     end,
     spreading_plague = function()
         player.hasPlague = true
@@ -949,9 +950,9 @@ function love.keypressed(key)
             end
             love.update = love.gameplay
         end
-    elseif key == "up" then
+    elseif key == "up" or key == "wu" then
         narrator:prevOption()
-    elseif key == "down" then
+    elseif key == "down" or key == "wd" then
         narrator:nextOption()
     end
 end
@@ -1249,7 +1250,7 @@ function love.gameplay(dt)
                 -- teleport straight to the cursor (or the max distance toward it)
                 player.x = math.max(0, math.min(player.x + dx / dist * travel, screenWidth - player.radius))
                 player.y = math.max(0, math.min(player.y + dy / dist * travel, screenHeight - player.radius))
-                player.dashCooldown = player.dashDelay
+                player.dashCooldown = player.dashDelay / player.castSpeed
                 portalBlast()
                 if hasMajor("rapid_boots") then fireBulletVolley() end
             else
@@ -1534,11 +1535,11 @@ local function drawTutorial()
     end
 
     heading("CONTROLS")
-    entry("Move", "WASD or the arrow keys.")
+    entry("Move", "WASD.")
     entry("Aim and attack", "Aim with the mouse. You attack automatically toward your cursor.")
     entry("Dash", "Space dashes toward your cursor, stopping there if it is close. It has a short cooldown.")
     entry("Pause", "Escape or E pauses the game and shows your stats and major upgrades.")
-    entry("Dialogue", "Space or Enter continues. Up and Down to change selection.")
+    entry("Dialogue", "Space or Enter continues. Up and Down or mouse wheel to change selection.")
 
     y = y + 8
     heading("UPGRADES")
