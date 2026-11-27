@@ -577,7 +577,7 @@ local majorEffects = {
         player.speed = player.speed + BASE_SPEED                 -- +100% movement speed
     end,
     giant_fireball = function()
-        player.giantFireballTimer = 0
+        player.giantFireballTimer = GIANT_FIREBALL_INTERVAL
     end,
     mana_siphon = function()
         player.castSpeed = player.castSpeed + 1.0                -- + 100% cast speed
@@ -598,10 +598,10 @@ local majorEffects = {
         end
     end,
     frostbite = function()
-        player.frostbiteTimer = 0
+        player.frostbiteTimer = FROSTBITE_INTERVAL
     end,
     orbital_strike = function()
-        player.orbitalTimer = 0
+        player.orbitalTimer = ORBITAL_INTERVAL
     end,
 }
 
