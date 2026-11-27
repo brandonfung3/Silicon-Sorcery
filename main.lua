@@ -27,6 +27,15 @@ local function loadFireball(path, frameTime)
     return image, anim8.newAnimation(frames, frameTime), fw, fh
 end
 
+-- 2x2 sheet where only the first 3 slots hold frames (top row, then bottom left)
+local function loadThreeFrameSheet(path, frameTime)
+    local image = love.graphics.newImage(path)
+    local iw, ih = image:getDimensions()
+    local fw, fh = iw / 2, ih / 2
+    local grid = anim8.newGrid(fw, fh, iw, ih)
+    return image, anim8.newAnimation(grid('1-2', 1, 1, 2), frameTime), fw, fh
+end
+
 local HIT_FLASH_TIME = 0.1          -- seconds to flash red when player, enemy is hit
 local PLAYER_INVULN_TIME = 0.5      -- seconds of invulnerability after being hit
 local MAX_DASH_DISTANCE = 150
@@ -38,8 +47,10 @@ local EARLY_UPGRADE_END_SCORE = 50   -- from this score on, the normal interval 
 local BASE_UPGRADE_INTERVAL = 10         -- score between minor upgrades at the start
 
 local MAX_MAJOR = 4
-local MAJOR_UPGRADE_SCORES = { 50, 100, 175, 250 } --score for major upgrades 1, 2, and 3
+local MAJOR_UPGRADE_SCORES = { 50, 125, 225, 350 } --score for major upgrades 1, 2, and 3
 local UPGRADE_INTERVAL_GROWTH = 5        -- added every 100 score after 300
+local GIANT_FIREBALL_SCALE = 2.5
+local GIANT_FIREBALL_RADIUS = 40
 local GIANT_FIREBALL_INTERVAL = 10       -- seconds between casts
 local CLOAK_REDUCTION = 0.5          -- extra damage reduction while the cloak is active
 local CLOAK_DAMAGE_PCT = 0.25        -- aura damage per second, as a fraction of magic power
@@ -47,6 +58,27 @@ local CLOAK_RADIUS = 90              -- how far the aura reaches (pixels)
 local CLOAK_EXPIRE_DELAY = 1         -- seconds the cloak lasts after the player is hit
 local CLOAK_RECAST_INTERVAL = 10     -- seconds until it returns after expiring
 local CLOAK_TINT = { 0.6, 0.85, 1 }  -- light blue
+local ORBIT_COUNT = 3
+local ORBIT_RADIUS = 120            -- distance from the player (pixels)
+local ORBIT_SPEED = 2              -- radians per second
+local ORBIT_ORB_RADIUS = 24        -- hitbox size of each orb
+local ORBIT_SPRITE_SCALE = 1.5    -- placeholder sprite scale
+local ORBIT_DAMAGE_PCT = 2.0       -- 3x magic damage
+local ORBIT_HIT_COOLDOWN = 0.5     -- seconds before the same orb can hit the same enemy again
+local FROSTBITE_INTERVAL = 5       -- seconds between casts
+local ICICLE_COUNT = 7
+local ICICLE_CONE = math.rad(60)   -- total width of the cone
+local ICICLE_SPEED = 450
+local ICICLE_SCALE = 0.8
+local ICICLE_RADIUS = 12           -- hitbox
+local FROST_SLOW_MULT = 0.7        -- 30% slower
+local FROST_SLOW_DURATION = 2      -- seconds
+local ORBITAL_INTERVAL = 15        -- seconds between strikes at 100% attack speed
+local ORBITAL_FALL_TIME = 1.0      -- seconds from cast to impact
+local ORBITAL_RADIUS = 75          -- blast radius (pixels)
+local ORBITAL_DAMAGE_PCT = 3.0     -- 3x attack power
+local ORBITAL_SPRITE_SCALE = 2     -- sprite scale
+local ORBITAL_BLAST_TIME = 0.2     -- how long the blast flash stays on screen
 
 local BASE_SPAWNS_PER_SECOND = 2         -- same as the old 1 enemy per 0.5s
 local SPAWN_RAMP_START_SCORE = 50        -- enemy spawn rate stays flat until 50 score
@@ -58,7 +90,8 @@ local PROJECTILES = {
     fireball = { stat = "magic", pct = 1.0 },
     bullet   = { stat = "attack", pct = 1.0 },
 
-    giant_fireball = { stat = "magic", pct = 3.0}
+    giant_fireball = { stat = "magic", pct = 3.0},
+    icicle = { stat = "magic", pct = 1.5 },
 }
 
 -- Power stat * its own multiplier
@@ -175,7 +208,7 @@ local function castGiantFireball(aimX, aimY)
         dy = math.sin(angle),
         angle = angle,
         speed = 300,
-        radius = 16,
+        radius = GIANT_FIREBALL_RADIUS,
         stat = PROJECTILES.giant_fireball.stat,
         damagePct = PROJECTILES.giant_fireball.pct,
         travelRemaining = dist,  -- distance to where the mouse was
@@ -234,9 +267,100 @@ local function updateCloak(dt)
         -- Recharging. The interval is checked every frame, so cooldown reduction
         -- picked up mid-recharge applies right away.
         player.cloakRecastTimer = player.cloakRecastTimer + dt
-        if player.cloakRecastTimer >= CLOAK_RECAST_INTERVAL * player.castCooldownMult then
+        if player.cloakRecastTimer >= CLOAK_RECAST_INTERVAL / player.castSpeed then
             player.cloakActive = true
             player.cloakAuraTimer = 0
+        end
+    end
+end
+
+-- Current position of each orb
+local function getOrbPositions()
+    local list = {}
+    for i = 0, ORBIT_COUNT - 1 do
+        local a = player.orbitAngle + i * (2 * math.pi / ORBIT_COUNT)
+        list[i + 1] = {
+            x = player.x + math.cos(a) * ORBIT_RADIUS,
+            y = player.y + math.sin(a) * ORBIT_RADIUS,
+        }
+    end
+    return list
+end
+
+-- Arcane Orbit: spin the orbs and damage enemies they touch
+local function updateOrbit(dt)
+    if not player.hasOrbit then return end
+
+    player.orbitAngle = player.orbitAngle + ORBIT_SPEED * player.castSpeed * dt
+
+    -- Tick down each orb's per-enemy hit cooldowns
+    for i = 1, ORBIT_COUNT do
+        for enemy, t in pairs(player.orbitHits[i]) do
+            t = t - dt
+            player.orbitHits[i][enemy] = (t > 0) and t or nil
+        end
+    end
+
+    local damage = getPower("magic") * ORBIT_DAMAGE_PCT
+    for i, orb in ipairs(getOrbPositions()) do
+        for e_idx = #enemies, 1, -1 do
+            local e = enemies[e_idx]
+            if not player.orbitHits[i][e]
+                and getDistance(orb.x, orb.y, e.x, e.y) < ORBIT_ORB_RADIUS + e.radius then
+                player.orbitHits[i][e] = ORBIT_HIT_COOLDOWN
+                damageEnemy(e_idx, damage)
+            end
+        end
+    end
+end
+
+-- Sprays a cone of icicles centered on the aim point
+local function castIcicles(aimX, aimY)
+    local center = math.atan2(aimY - player.y, aimX - player.x)
+    local step = ICICLE_CONE / (ICICLE_COUNT - 1)
+
+    for i = 0, ICICLE_COUNT - 1 do
+        local a = center + (i - (ICICLE_COUNT - 1) / 2) * step
+        table.insert(bullets, {
+            kind = "icicle",
+            x = player.x,
+            y = player.y,
+            dx = math.cos(a),
+            dy = math.sin(a),
+            angle = a,
+            speed = ICICLE_SPEED,
+            radius = ICICLE_RADIUS,
+            stat = PROJECTILES.icicle.stat,
+            damagePct = PROJECTILES.icicle.pct,
+        })
+    end
+end
+
+-- Orbital Strike: mark a spot; the strike lands there after ORBITAL_FALL_TIME
+local function castOrbitalStrike(aimX, aimY)
+    table.insert(strikes, { x = aimX, y = aimY, timer = 0, landed = false, blastTimer = 0 })
+end
+
+local function updateStrikes(dt)
+    for i = #strikes, 1, -1 do
+        local s = strikes[i]
+        if not s.landed then
+            s.timer = s.timer + dt
+            if s.timer >= ORBITAL_FALL_TIME then
+                -- Impact: damage everything in the blast radius
+                s.landed = true
+                s.blastTimer = ORBITAL_BLAST_TIME
+                local damage = getPower("attack") * ORBITAL_DAMAGE_PCT
+                for e_idx = #enemies, 1, -1 do
+                    local e = enemies[e_idx]
+                    if getDistance(s.x, s.y, e.x, e.y) < ORBITAL_RADIUS + e.radius then
+                        damageEnemy(e_idx, damage)
+                    end
+                end
+            end
+        else
+            s.blastTimer = s.blastTimer - dt
+            if s.blastTimer <= 0 then table.remove(strikes, i) end
         end
     end
 end
@@ -350,22 +474,30 @@ local upgradePool = {
       label = function(v) return "Aegis - +" .. fmt(v) .. "% damage reduction" end,
       text = "Blows seem to glance off you.",
       apply = function(v) player.damageReduction = math.min(0.95, roundTo(player.damageReduction + v / 100, 3)) end },
+    { id = "cast_speed", base = 15, decimals = 0, rare = 0.03,   -- percent
+      label = function(v) return "Arcane Tempo - +" .. fmt(v) .. "% cast speed" end,
+      text = "Your spells come faster than thought.",
+      apply = function(v) player.castSpeed = roundTo(player.castSpeed + v / 100, 2) end },
 }
 
 -- The effects aren't implemented yet; the text lines are placeholder flavor.
 local majorPools = {
     { name = "Wizard", upgrades = {
-        { id = "frostbite",      name = "Frostbite",        
-          text = "Cold creeps along your staff.", },
+        { id = "frostbite",      name = "Frostbite Staff",        
+          text = "Cold creeps along your staff.", 
+          desc = "Every 5 seconds, cast a cone of icicles that deal damage and slow enemies"},
         { id = "giant_fireball", name = "Giant fireball",   
           text = "Your flames swell beyond reason.",
           desc = "Every 10 seconds, cast a giant fireball that pierces enemies and bursts into a ring of fireballs" },
         { id = "celestial_cloak", name = "Celestial Cloak",
           text = "Starlight settles over your shoulders.",
-          desc = "Gain a cloak that grants 50% damage reduction and deals 25% of your magic power each second to nearby enemies. It fades 1 second after you take damage and is recast after 10 seconds." },        { id = "arcane_orbit",   name = "Arcane Orbit",     text = "Orbs of power circle you." },
+          desc = "Gain a cloak that grants 50% damage reduction and deals 25% of your magic power each second to nearby enemies. It fades 1 second after you take damage and is recast after 10 seconds." },
         { id = "mana_siphon", name = "Mana Siphon",
           text = "The magic around you begins to flow into you.",
           desc = "Your spell casting speed has increased. Upgrades now also grant 1 magic power." },
+        { id = "arcane_orbit", name = "Arcane Orbit",
+          text = "Orbs of power circle you.",
+          desc = "Three orbs circle you, dealing triple your magic power to enemies they touch." },
     }},
     { name = "Cybernetic", upgrades = {
         { id = "pulse_cannon",   name = "Pulse Cannon arm",  
@@ -374,7 +506,9 @@ local majorPools = {
         { id = "titanium_bio",   name = "Titanium Bioskeleton", 
           text = "Metal laces through your bones.",
           desc = "You now take less damage and have more health, and your attack power has increased significantly." },
-        { id = "orbital_strike", name = "Orbital Strike Uplink",  text = "Somewhere above, a satellite wakes." },
+        { id = "orbital_strike", name = "Orbital Strike Uplink",
+          text = "Somewhere above, a satellite wakes.",
+          desc = "Periodically call a massive strike, dealing triple your attack power to enemies in the blast. You can call strikes faster with attack speed." },        
         { id = "overclocked_servos", name = "Overclocked Servos",
           text = "Your joints whine as the limiters come off.",
           desc = "Your attack and movement speed have increased significantly." },
@@ -416,13 +550,28 @@ local majorEffects = {
         player.giantFireballTimer = 0
     end,
     mana_siphon = function()
-        player.castCooldownMult = player.castCooldownMult * 0.5
+        player.castSpeed = player.castSpeed + 1.0                -- + 100% cast speed
     end,
     celestial_cloak = function()
         player.hasCloak = true
         player.cloakActive = true
         player.cloakAuraTimer = 0
         player.cloakExpiring = false
+    end,
+    arcane_orbit = function()
+        player.hasOrbit = true
+        player.orbitAngle = 0
+        player.orbitHits = {}
+        for i = 1, ORBIT_COUNT do
+            -- weak keys, so dead enemies don't pile up in the table
+            player.orbitHits[i] = setmetatable({}, { __mode = "k" })
+        end
+    end,
+    frostbite = function()
+        player.frostbiteTimer = 0
+    end,
+    orbital_strike = function()
+        player.orbitalTimer = 0
     end,
 }
 
@@ -691,7 +840,7 @@ function love.load()
     fireballImage, fireballAnimation, fireballW, fireballH = loadFireball("sprites/fireball.png", 0.1)
     bulletImage, bulletAnimation, bulletW, bulletH = loadFireball("sprites/simple_bullet.png", 0.1)
     giantFireballImage, giantFireballAnimation, giantFireballW, giantFireballH = loadFireball("sprites/giant_fireball.png", 0.1)
-
+    bigHurtyImage, bigHurtyAnimation, bigHurtyW, bigHurtyH = loadThreeFrameSheet("sprites/big_hurty.png", 0.1)
     background = love.graphics.newImage("sprites/background.png")
     defaultFont = love.graphics.getFont()
     menuFont = love.graphics.newFont(24)
@@ -722,6 +871,7 @@ function resetGame()
         magicMult = 1.0,   -- 1.0 = 100%; scales magic power (fireballs, cloak) and magic power
         damageReduction = 0,        -- 0 = 0% damage reduction
         attackSpeed = 1.0,          -- 1.0 = 100% attack speed
+        castSpeed = 1.0,             -- 1.0 = 100% cast speed; 2.0 casts spells twice as often
 
         hitFlashTimer = 0,          -- Time left for hit flash effect
         invulnTimer = 0,            -- Time left before player can be hit again (after taking damage)
@@ -731,7 +881,7 @@ function resetGame()
         nextMajorIndex = 1,         -- which entry of MAJOR_UPGRADE_SCORES comes next
         majorUpgrades = {},         -- list of major upgrades the player has chosen
         giantFireballTimer = 0,     -- timer for casting giant fireball if the player has that major upgrade
-        castCooldownMult = 1.0,     -- multiplies the time between ability casts
+        frostbiteTimer = 0,         -- timer for casting frostbite 
         -- Celestial Cloak
         hasCloak = false,
         cloakActive = false,
@@ -740,6 +890,12 @@ function resetGame()
         cloakExpireTimer = 0,
         cloakRecastTimer = 0,
         powerConversion = "none",   -- "none", "toMagic" or "toAttack"
+        -- Arcane Orbit
+        hasOrbit = false,
+        orbitAngle = 0,
+        orbitHits = {},   -- one table per orb, filled when the upgrade is picked
+        -- Orbital Strike
+        orbitalTimer = 0,
 
         -- Dash variables
         dashForce = 1200,    -- dash speed in pixels per second
@@ -757,6 +913,7 @@ function resetGame()
     -- Lists to keep track of all active objects on screen
     enemies = {}
     bullets = {}
+    strikes = {}
  
     -- Timers for enemies
     enemySpawnTimer = 0
@@ -829,6 +986,7 @@ function love.gameplay(dt)
     fireballAnimation:update(dt)
     bulletAnimation:update(dt)
     giantFireballAnimation:update(dt)
+    bigHurtyAnimation:update(dt)
 
     -- Update the hit flash timer
     if player.hitFlashTimer > 0 then
@@ -841,6 +999,15 @@ function love.gameplay(dt)
     end
 
     updateCloak(dt)
+    updateOrbit(dt)
+    -- Orbital Strike: call down a strike every 15 seconds (sooner with attack speed)
+    if hasMajor("orbital_strike") then
+        player.orbitalTimer = player.orbitalTimer + dt
+        if player.orbitalTimer >= ORBITAL_INTERVAL / player.attackSpeed then
+            player.orbitalTimer = 0
+            castOrbitalStrike(mouseX, mouseY)
+        end
+    end
     
     -- Major upgrades at the scores in MAJOR_UPGRADE_SCORES (>= so a score jump can't skip one)
     local majorScore = MAJOR_UPGRADE_SCORES[player.nextMajorIndex]
@@ -960,6 +1127,7 @@ function love.gameplay(dt)
             speed = 150,
             radius = 16,
 
+            slowTimer = 0,                          -- time left on the frostbite slow
             hitFlash = 0,                           -- Time left for hit flash effect
             animation = cyborgAnimation:clone()     -- each enemy gets its own animation clock
         }
@@ -977,9 +1145,15 @@ function love.gameplay(dt)
             e.hitFlash = math.max(0, e.hitFlash - dt)
         end
  
+        local speedMult = 1
+        if e.slowTimer > 0 then
+            e.slowTimer = e.slowTimer - dt
+            speedMult = FROST_SLOW_MULT
+        end
+
         local angle = math.atan2(player.y - e.y, player.x - e.x)
-        e.x = e.x + math.cos(angle) * e.speed * dt
-        e.y = e.y + math.sin(angle) * e.speed * dt
+        e.x = e.x + math.cos(angle) * e.speed * speedMult * dt
+        e.y = e.y + math.sin(angle) * e.speed * speedMult * dt
 
         -- Check if enemy touched the player (only if the player isn't locked out)
         if player.invulnTimer <= 0
@@ -1022,9 +1196,18 @@ function love.gameplay(dt)
     -- Giant fireball cast automatically every 10 seconds
     if hasMajor("giant_fireball") then
         player.giantFireballTimer = player.giantFireballTimer + dt
-        if player.giantFireballTimer >= GIANT_FIREBALL_INTERVAL * player.castCooldownMult then
+        if player.giantFireballTimer >= GIANT_FIREBALL_INTERVAL / player.castSpeed then
             player.giantFireballTimer = 0
             castGiantFireball(mouseX, mouseY)
+        end
+    end
+
+    -- Frostbite Staff: spray icicles every 5 seconds
+    if hasMajor("frostbite") then
+        player.frostbiteTimer = player.frostbiteTimer + dt
+        if player.frostbiteTimer >= FROSTBITE_INTERVAL / player.castSpeed then
+            player.frostbiteTimer = 0
+            castIcicles(mouseX, mouseY)
         end
     end
  
@@ -1076,6 +1259,11 @@ function love.gameplay(dt)
                             spawnPulseFireballs(b, e)
                         end
 
+                        -- Frostbite: icicles slow the enemy they hit
+                        if b.kind == "icicle" then
+                            e.slowTimer = FROST_SLOW_DURATION
+                        end
+
                         damageEnemy(e_idx, getProjectileDamage(b))
                         hit = true
                         break
@@ -1115,7 +1303,7 @@ function drawPauseMenu()
     love.graphics.setColor(0, 0, 0, 0.6)
     love.graphics.rectangle("fill", 0, 0, screenWidth, screenHeight)
 
-    local boxW, boxH = 380, 540
+    local boxW, boxH = 380, 560
     local boxX = (screenWidth - boxW) / 2
     local boxY = (screenHeight - boxH) / 2
     love.graphics.setColor(0.1, 0.1, 0.15, 0.95)
@@ -1138,12 +1326,13 @@ function drawPauseMenu()
         "    Armor: " .. fmt(player.defense),
         "    Damage reduction: " .. pct(getDamageReduction()),
         "",
-        "Damage",
-        "    Attack speed: " .. pct(player.attackSpeed),        
+        "Damage",     
         "    Attack power: " .. fmt(player.attackPower),
         "    Magic power: " .. fmt(player.magicPower),
         "    Attack multiplier: " .. pct(player.attackMult),
         "    Magic multiplier: " .. pct(player.magicMult),
+        "    Attack speed: " .. pct(player.attackSpeed),
+        "    Cast speed: " .. pct(player.castSpeed), 
     }
     table.insert(lines, "")
     table.insert(lines, "Major upgrades")
@@ -1184,6 +1373,17 @@ function love.draw()
         gameMap:drawLayer(gameMap.layers["Ground"])
         gameMap:drawLayer(gameMap.layers["Trees"])
     cam:detach()
+
+    -- Orbital Strike warning circles
+    for _, s in ipairs(strikes) do
+        if not s.landed then
+            local p = s.timer / ORBITAL_FALL_TIME
+            love.graphics.setColor(0, 0, 0, 0.25 + 0.3 * p)   -- gets darker as the strike nears
+            love.graphics.circle("fill", s.x, s.y, ORBITAL_RADIUS)
+            love.graphics.setColor(0, 0, 0, 0.8)
+            love.graphics.circle("line", s.x, s.y, ORBITAL_RADIUS)
+        end
+    end
  
     -- Celestial Cloak damage radius
     if player.cloakActive then
@@ -1202,10 +1402,21 @@ function love.draw()
     sprite.animation:draw(sprite.image, player.x, player.y, 0, 1.5, 1.5, 16, 16)
     love.graphics.setColor(1, 1, 1, 1)
  
-    -- Draw enemies
+    -- Arcane Orbit orbs (giant fireball sprite as a placeholder)
+    if player.hasOrbit then
+        love.graphics.setColor(1, 1, 1, 1)
+        for _, orb in ipairs(getOrbPositions()) do
+            giantFireballAnimation:draw(giantFireballImage, orb.x, orb.y, 0,
+                ORBIT_SPRITE_SCALE, ORBIT_SPRITE_SCALE, giantFireballW / 2, giantFireballH / 2)
+        end
+    end
+
+    -- Draw enemies (light blue while slowed, red flash on top when hit)
     for _, e in ipairs(enemies) do
         local flash = e.hitFlash / HIT_FLASH_TIME
-        love.graphics.setColor(1, 1 - 0.8 * flash, 1 - 0.8 * flash, 1)
+        local r, g, b = 1, 1, 1
+        if e.slowTimer > 0 then r, g, b = 0.35, 0.6, 1 end
+        love.graphics.setColor(r, g * (1 - 0.8 * flash), b * (1 - 0.8 * flash), 1)
         e.animation:draw(cyborgImage, e.x, e.y, 0, 1.5, 1.5, 16, 16)
     end
     love.graphics.setColor(1, 1, 1, 1)
@@ -1216,11 +1427,31 @@ function love.draw()
         if b.kind == "bullet" then
             bulletAnimation:draw(bulletImage, b.x, b.y, b.angle, 1, 1, bulletW / 2, bulletH / 2)
         elseif b.kind == "giant_fireball" then
-            giantFireballAnimation:draw(giantFireballImage, b.x, b.y, b.angle, 1, 1, giantFireballW / 2, giantFireballH / 2)
+            giantFireballAnimation:draw(giantFireballImage, b.x, b.y, b.angle, GIANT_FIREBALL_SCALE, GIANT_FIREBALL_SCALE, giantFireballW / 2, giantFireballH / 2)
+        elseif b.kind == "icicle" then
+            love.graphics.setColor(0.35, 0.6, 1, 1)  -- light blue, so they read as ice
+            giantFireballAnimation:draw(giantFireballImage, b.x, b.y, b.angle, ICICLE_SCALE, ICICLE_SCALE, giantFireballW / 2, giantFireballH / 2)
+            love.graphics.setColor(1, 1, 1, 1)
         else
             fireballAnimation:draw(fireballImage, b.x, b.y, b.angle, 1, 1, fireballW / 2, fireballH / 2)
         end
     end
+
+    -- Orbital Strike: falling sprite, then the blast flash
+    for _, s in ipairs(strikes) do
+        if s.landed then
+            local a = s.blastTimer / ORBITAL_BLAST_TIME
+            love.graphics.setColor(1, 0.7, 0.2, 0.6 * a)
+            love.graphics.circle("fill", s.x, s.y, ORBITAL_RADIUS)
+        else
+            local p = s.timer / ORBITAL_FALL_TIME
+            local startY = -bigHurtyW * ORBITAL_SPRITE_SCALE   -- once rotated, its width is the vertical length
+            local y = startY + (s.y - startY) * p * p
+            love.graphics.setColor(1, 1, 1, 1)
+            bigHurtyAnimation:draw(bigHurtyImage, s.x, y, math.pi / 2, ORBITAL_SPRITE_SCALE, ORBITAL_SPRITE_SCALE, bigHurtyW / 2, bigHurtyH / 2)
+        end
+    end
+    love.graphics.setColor(1, 1, 1, 1)
  
     -- Draw UI/text (black)
     love.graphics.setFont(hudFont)
