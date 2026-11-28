@@ -94,6 +94,18 @@ local IMMOLATE_RADIUS_MAX = 260        -- the radius never grows past this
 local IMMOLATE_MAGIC_PCT = 0.5         -- 0.5x magic power
 local IMMOLATE_HP_PCT = 0.1            -- plus 10% of max HP
 local IMMOLATE_COLOR = { 1, 0.2, 0.15 }
+local SOUL_SIPHON_DAMAGE_MULT = 0.25   -- +25% damage multiplier
+local SOUL_SIPHON_HEAL = 3             -- HP restored per kill
+local SOUL_SIPHON_POWER = 1.5            -- magic power per kill
+local SOUL_SIPHON_DURATION = 10        -- seconds each bonus lasts
+local PIERCING_COUNT = 3           -- rounds per shot
+local PIERCING_INTERVAL = 1.5        -- seconds between shots at 100% attack speed
+local PIERCING_CONE = math.rad(20) -- total spread of the shotgun blast
+local PIERCING_SPEED = 700
+local PIERCING_RANGE = 150         -- "short distance" in pixels
+local PIERCING_RADIUS = 8          -- hitbox
+local RICOCHET_BOUNCES = 2         -- bounces per bullet
+local RICOCHET_DAMAGE_MULT = 0.5   -- bounce hits deal 0.5x the bullet's damage
 
 -- Enemies
 local RARE_MIN_SCORE = 50
@@ -126,12 +138,14 @@ local PROJECTILES = {
 
     giant_fireball = { stat = "magic", pct = 1.5},
     icicle = { stat = "magic", pct = 1.5 },
+    piercing_round = { stat = "attack", pct = 0.5 },
 }
 
 -- Power stat * its own multiplier. With Armored Bullets, armor counts as extra physical power.
 local function getPower(stat)
     if stat == "magic" then
-        return player.magicPower * player.magicMult
+        local bonus = #player.soulTimers * SOUL_SIPHON_POWER
+        return (player.magicPower + bonus) * player.magicMult
     end
     local base = player.attackPower
     if player.armoredBullets then base = base + player.defense end
@@ -139,7 +153,7 @@ local function getPower(stat)
 end
 --What a given projectile's damage deals right now
 local function getProjectileDamage(kind)
-    return getPower(kind.stat) * kind.damagePct
+    return getPower(kind.stat) * kind.damagePct * (kind.damageMult or 1)
 end
  
 -- Helper function to find the distance between two points
@@ -160,6 +174,18 @@ local function poisonClosest(x, y)
     return best ~= nil
 end
 
+-- Ricochet: closest enemy this bullet hasn't already hit. Returns nil if none.
+local function findRicochetTarget(b)
+    local best, bestD = nil, math.huge
+    for _, e in ipairs(enemies) do
+        if not (b.hitEnemies and b.hitEnemies[e]) then
+            local d = getDistance(b.x, b.y, e.x, e.y)
+            if d < bestD then best, bestD = e, d end
+        end
+    end
+    return best
+end
+
 local function damageEnemy(index, amount, stat)
     local e = enemies[index]
     e.enemy_hp = e.enemy_hp - amount
@@ -176,6 +202,10 @@ local function damageEnemy(index, amount, stat)
     if e.enemy_hp <= 0 then
         table.remove(enemies, index)
         score = score + (e.scoreValue or 1)
+        if player.hasSoulSiphon then
+            player.hp = math.min(player.maxHp, player.hp + SOUL_SIPHON_HEAL)
+            table.insert(player.soulTimers, SOUL_SIPHON_DURATION)
+        end
         -- the poison moves to the closest unpoisoned enemy
         if e.poisoned and player.hasPlague then poisonClosest(e.x, e.y) end
     end
@@ -238,6 +268,31 @@ local function fireBulletVolley()
             radius = 4,
             stat = PROJECTILES.bullet.stat,
             damagePct = PROJECTILES.bullet.pct,
+        })
+    end
+end
+
+-- Piercing Round: fires PIERCING_COUNT rounds at once in a tight cone around the aim point.
+-- Each round passes through enemies, hitting each once, and stops after PIERCING_RANGE pixels.
+local function firePiercingRound(aimX, aimY)
+    local center = math.atan2(aimY - player.y, aimX - player.x)
+    local step = PIERCING_CONE / (PIERCING_COUNT - 1)
+
+    for i = 0, PIERCING_COUNT - 1 do
+        local a = center + (i - (PIERCING_COUNT - 1) / 2) * step
+        table.insert(bullets, {
+            kind = "piercing_round",
+            x = player.x,
+            y = player.y,
+            dx = math.cos(a),
+            dy = math.sin(a),
+            angle = a,
+            speed = PIERCING_SPEED,
+            radius = PIERCING_RADIUS,
+            stat = PROJECTILES.piercing_round.stat,
+            damagePct = PROJECTILES.piercing_round.pct,
+            travelRemaining = PIERCING_RANGE,
+            hitEnemies = {},
         })
     end
 end
@@ -541,6 +596,14 @@ local function updateBlasts(dt)
     end
 end
 
+-- Soul Siphon: each kill's magic power bonus expires on its own timer
+local function updateSoulSiphon(dt)
+    for i = #player.soulTimers, 1, -1 do
+        player.soulTimers[i] = player.soulTimers[i] - dt
+        if player.soulTimers[i] <= 0 then table.remove(player.soulTimers, i) end
+    end
+end
+
 --
 -- Upgrades -------------------------------------------------------------------
 --
@@ -661,11 +724,14 @@ local majorPools = {
         { id = "immolate", name = "Immolate",
           text = "Your blood runs hot, and the air around you ignites.",
           desc = "Gain max health. Burn nearby enemies every second, dealing magic damage. The damage and size both increase with your max health " },
-    }},
+        { id = "soul_siphon", name = "Soul Siphon",
+          text = "The fading breath of your enemies feeds you.", 
+          desc = "Disable health regeneration. Deal 25% increased damage. Defeating an enemy restores health and grants temporary magic power." },
+        }},
     { name = "Cybernetic", upgrades = {
         { id = "pulse_cannon",   name = "Pulse Cannon arm",  
           text = "Your arm whirs and splits into a cannon.",
-          desc = "Deal 25% reduced damage. Bullets that hit an enemy split into 2 fireballs. Swap your primary weapon is now the blaster" },
+          desc = "Deal 25% reduced damage. Bullets that hit an enemy split into 2 fireballs. Swaps your basic weapon to the blaster" },
         { id = "titanium_bio",   name = "Titanium Bioskeleton", 
           text = "Metal laces through your bones.",
           desc = "Take less damage and gain health and physical power." },
@@ -684,7 +750,13 @@ local majorPools = {
         { id = "reinforced_bullets", name = "Reinforced Bullets",
           text = "You load in your new ammunition.",
           desc = "Your physical power is increased by your armor. Gain 15 Armor." },
-    }},
+        { id = "piercing_round", name = "Piercing Round",
+          text = "Your cannon hums, loaded with something sharper.",
+          desc = "Periodically fire a rapid burst of 3 piercing rounds toward your cursor a short distance, dealing 50% physical damage to each enemy hit." },
+        { id = "ricochet", name = "Ricochet",
+          text = "Your rounds learn to find a second target.",
+          desc = "Bullets that hit an enemy bounce to the next closest enemy, up to 2 times, dealing reduced damage per bounce. Bullets cannot hit the same enemy twice. Swaps your basic weapon to the blaster" },
+        }},
 }
 
 local function hasMajor(id)
@@ -760,6 +832,17 @@ local majorEffects = {
         player.maxHp = player.maxHp + 25          -- +25 max HP, healing the same amount
         player.hp = math.min(player.maxHp, player.hp + 25)
     end,
+    soul_siphon = function()
+        player.hasSoulSiphon = true
+        player.regen = 0
+        addDamageMult(SOUL_SIPHON_DAMAGE_MULT)
+    end,
+    piercing_round = function()
+        player.piercingTimer = 0
+    end,
+    ricochet = function()  
+        player.weapon = "bullet" -- basic attack becomes bullets
+    end,
 }
 
 -- One random not-yet-owned upgrade from each pool
@@ -808,7 +891,8 @@ local function pickUpgrades(n)
 
     -- Roll each rare upgrade separately; everything else goes in the normal pool
     for _, u in ipairs(upgradePool) do
-        if u.rare then
+        if u.id == "regen" and hasMajor("soul_siphon") then
+        elseif u.rare then
             if #chosen < n and math.random() < u.rare then
                 table.insert(chosen, u)
             end
@@ -963,7 +1047,7 @@ function love.keypressed(key)
     end
 
     --Pause / resume 
-    if key == "escape" or key == "e" then
+    if key == "escape" or key == "tab" then
         if love.update == love.gameplay then
             love.update = love.paused
         elseif love.update == love.paused then
@@ -1001,9 +1085,9 @@ function love.keypressed(key)
             end
             love.update = love.gameplay
         end
-    elseif key == "up" or key == "wu" then
+    elseif key == "up" or key == "q" then
         narrator:prevOption()
-    elseif key == "down" or key == "wd" then
+    elseif key == "down" or key == "e" then
         narrator:nextOption()
     end
 end
@@ -1050,6 +1134,8 @@ function love.load()
     bulletImage, bulletAnimation, bulletW, bulletH = loadFireball("sprites/simple_bullet.png", 0.1)
     giantFireballImage, giantFireballAnimation, giantFireballW, giantFireballH = loadFireball("sprites/giant_fireball.png", 0.1)
     bigHurtyImage, bigHurtyAnimation, bigHurtyW, bigHurtyH = loadThreeFrameSheet("sprites/big_hurty.png", 0.1)
+    mediumBulletImage, mediumBulletAnimation, mediumBulletW, mediumBulletH = loadFireball("sprites/mediumbullet.png", 0.1)
+    
     background = love.graphics.newImage("sprites/background.png")
 
     defaultFont = love.graphics.getFont()
@@ -1120,6 +1206,11 @@ function resetGame()
         -- Immolate
         hasImmolate = false,
         immolateTimer = 0,
+        -- Soul Siphon
+        hasSoulSiphon = false,
+        soulTimers = {},   -- one remaining-time entry per active +magic power stack
+        -- Piercing Round
+        piercingTimer = 0,
 
         -- Dash variables
         dashForce = 1200,    -- dash speed in pixels per second
@@ -1217,6 +1308,7 @@ function love.gameplay(dt)
     bulletAnimation:update(dt)
     giantFireballAnimation:update(dt)
     bigHurtyAnimation:update(dt)
+    mediumBulletAnimation:update(dt)
 
     -- Update the hit flash timer
     if player.hitFlashTimer > 0 then
@@ -1234,6 +1326,7 @@ function love.gameplay(dt)
     updateStrikes(dt)
     updatePlague(dt)
     updateBlasts(dt)
+    updateSoulSiphon(dt)
 
     if player.portalBuffTimer > 0 then player.portalBuffTimer = player.portalBuffTimer - dt end
     
@@ -1256,14 +1349,14 @@ function love.gameplay(dt)
     --minor upgrades
     if score >= player.nextUpgradeScore then
         player.minorUpgradeCount = player.minorUpgradeCount + 1
-        player.nextUpgradeScore = score + getUpgradeInterval(player.minorUpgradeCount)
-        player.barStart = score
+        player.barStart = player.nextUpgradeScore
+        player.nextUpgradeScore = player.nextUpgradeScore + getUpgradeInterval(player.minorUpgradeCount)
         startUpgrade(pickUpgrades(3), "Power surges through you. Choose your boon.")
         return
     end
  
     -- Health regeneration
-    if player.regen > 0 then
+    if player.regen > 0 and not player.hasSoulSiphon then
         player.hp = math.min(player.maxHp, player.hp + player.regen * dt)
     end
  
@@ -1485,6 +1578,15 @@ function love.gameplay(dt)
             castOrbitalStrike()
         end
     end
+
+    -- Piercing Round: fire a shotgun-style spread every few seconds
+    if hasMajor("piercing_round") then
+        player.piercingTimer = player.piercingTimer + dt
+        if player.piercingTimer >= PIERCING_INTERVAL / player.castSpeed then
+            player.piercingTimer = 0
+            firePiercingRound(mouseX, mouseY)
+        end
+    end
  
     -- Movement of bullets + enemy collision
     for b_idx = #bullets, 1, -1 do
@@ -1515,6 +1617,27 @@ function love.gameplay(dt)
                 spawnFireballRing(b, nil)
                 table.remove(bullets, b_idx)
             end
+
+        elseif b.kind == "piercing_round" then
+            local step = math.min(b.speed * dt, b.travelRemaining)
+            b.x = b.x + b.dx * step
+            b.y = b.y + b.dy * step
+            b.travelRemaining = b.travelRemaining - step
+
+            -- Damage every enemy it passes through, once each
+            for e_idx = #enemies, 1, -1 do
+                local e = enemies[e_idx]
+                if not b.hitEnemies[e]
+                    and getDistance(b.x, b.y, e.x, e.y) < b.radius + e.radius then
+                    b.hitEnemies[e] = true
+                    damageEnemy(e_idx, getProjectileDamage(b), b.stat)
+                end
+            end
+
+            local offScreen = b.x < 0 or b.x > screenWidth or b.y < 0 or b.y > screenHeight
+            if b.travelRemaining <= 0 or offScreen then
+                table.remove(bullets, b_idx)
+            end
         else
             b.x = b.x + b.dx * b.speed * dt
             b.y = b.y + b.dy * b.speed * dt
@@ -1526,10 +1649,11 @@ function love.gameplay(dt)
                 local hit = false
                 for e_idx = #enemies, 1, -1 do
                     local e = enemies[e_idx]
-                    --if bullet hits enemy, reduce enemy hp and remove bullet
+                    -- skip the enemy a fireball came from and any enemy this bullet already hit
                     if e ~= b.ignoreEnemy
+                        and not (b.hitEnemies and b.hitEnemies[e])
                         and getDistance(b.x, b.y, e.x, e.y) < b.radius + e.radius then
-                        -- Pulse Cannon: bullets split into 2 fireballs on impact
+                        -- Pulse Cannon: every bullet hit (including bounces) splits into 2 fireballs
                         if b.kind == "bullet" and hasMajor("pulse_cannon") then
                             spawnPulseFireballs(b, e)
                         end
@@ -1541,6 +1665,24 @@ function love.gameplay(dt)
 
                         damageEnemy(e_idx, getProjectileDamage(b), b.stat)
                         hit = true
+
+                        -- Ricochet: redirect to the next closest unhit enemy instead of vanishing
+                        if b.kind == "bullet" and hasMajor("ricochet") then
+                            b.hitEnemies = b.hitEnemies or {}
+                            b.hitEnemies[e] = true
+                            b.bounces = b.bounces or 0
+
+                            if b.bounces < RICOCHET_BOUNCES then
+                                local target = findRicochetTarget(b)
+                                if target then
+                                    local a = math.atan2(target.y - b.y, target.x - b.x)
+                                    b.dx, b.dy, b.angle = math.cos(a), math.sin(a), a
+                                    b.bounces = b.bounces + 1
+                                    b.damageMult = RICOCHET_DAMAGE_MULT
+                                    hit = false   -- keep the bullet alive
+                                end
+                            end
+                        end
                         break
                     end
                 end
@@ -1608,8 +1750,8 @@ local function drawTutorial()
     entry("Move", "WASD.")
     entry("Aim and attack", "Aim with the mouse. You attack automatically toward your cursor.")
     entry("Dash", "Space dashes toward your cursor, stopping there if it is close. It has a short cooldown.")
-    entry("Pause", "Escape or E pauses the game and shows your stats and major upgrades.")
-    entry("Dialogue", "Space or Enter continues. Up and Down or mouse wheel to change selection.")
+    entry("Pause", "Escape or Tab pauses the game and shows your stats and major upgrades.")
+    entry("Dialogue", "Space or Enter continues. Up and Down or Q and E to change selection.")
 
     y = y + 8
     heading("UPGRADES")
@@ -1665,8 +1807,9 @@ function drawPauseMenu()
         "    Damage reduction: " .. pct(getDamageReduction()),
         "",
         "Damage",     
-        "    Physical power: " .. fmt(player.attackPower + (player.armoredBullets and player.defense or 0)),            "    Magic power: " .. fmt(player.magicPower),
-        "    Physical multiplier: " .. pct(player.attackMult),
+        "    Physical power: " .. fmt(player.attackPower + (player.armoredBullets and player.defense or 0)),  
+        "    Physical multiplier: " .. pct(player.attackMult),          
+        "    Magic power: " .. fmt(player.magicPower + #player.soulTimers * SOUL_SIPHON_POWER),        
         "    Magic multiplier: " .. pct(player.magicMult),
         "    Attack speed: " .. pct(player.attackSpeed),
         "    Cast speed: " .. pct(player.castSpeed), 
@@ -1785,6 +1928,8 @@ function love.draw()
             love.graphics.setColor(0.35, 0.6, 1, 1)  -- light blue, so they read as ice
             giantFireballAnimation:draw(giantFireballImage, b.x, b.y, b.angle, ICICLE_SCALE, ICICLE_SCALE, giantFireballW / 2, giantFireballH / 2)
             love.graphics.setColor(1, 1, 1, 1)
+        elseif b.kind == "piercing_round" then
+            mediumBulletAnimation:draw(mediumBulletImage, b.x, b.y, b.angle, 1, 1, mediumBulletW / 2, mediumBulletH / 2)
         else
             fireballAnimation:draw(fireballImage, b.x, b.y, b.angle, 1, 1, fireballW / 2, fireballH / 2)
         end
