@@ -43,7 +43,7 @@ local BASE_SHOOT_RATE = 0.5         -- seconds between shots
 local BASE_SPEED = 200
 
 local UPGRADE_INTERVAL_START = 5        -- score per upgrade at the start
-local UPGRADE_INTERVAL_MAX = 50         -- the interval never grows past this
+local UPGRADE_INTERVAL_MAX = 65         -- the interval never grows past this
 local UPGRADE_INTERVAL_STEP = 5         -- how much the interval grows each time
 local UPGRADES_PER_STEP = 4             -- upgrades taken before the interval grows
 local DOUBLE_UPGRADE_CHANCE = 0.05   -- chance per offered minor upgrade to be doubled
@@ -54,7 +54,7 @@ local GIANT_FIREBALL_SCALE = 2.5
 local GIANT_FIREBALL_RADIUS = 40
 local GIANT_FIREBALL_INTERVAL = 10       -- seconds between casts
 local CLOAK_REDUCTION = 0.5          -- extra damage reduction while the cloak is active
-local CLOAK_DAMAGE_PCT = 1.5        -- aura damage per second, as a fraction of magic power
+local CLOAK_DAMAGE_PCT = 1        -- aura damage per second, as a fraction of magic power
 local CLOAK_RADIUS = 90              -- how far the aura reaches (pixels)
 local CLOAK_EXPIRE_DELAY = 1         -- seconds the cloak lasts after the player is hit
 local CLOAK_RECAST_INTERVAL = 10     -- seconds until it returns after expiring
@@ -64,7 +64,7 @@ local ORBIT_RADIUS = 120            -- distance from the player (pixels)
 local ORBIT_SPEED = 2              -- radians per second
 local ORBIT_ORB_RADIUS = 24        -- hitbox size of each orb
 local ORBIT_SPRITE_SCALE = 1.5    -- placeholder sprite scale
-local ORBIT_DAMAGE_PCT = 2.0       -- 2x magic damage
+local ORBIT_DAMAGE_PCT = 1.5       -- 1.5x magic damage
 local ORBIT_HIT_COOLDOWN = 0.5     -- seconds before the same orb can hit the same enemy again
 local FROSTBITE_INTERVAL = 5       -- seconds between casts
 local ICICLE_COUNT = 7
@@ -82,14 +82,34 @@ local ORBITAL_DAMAGE_PCT = 3.0     -- 3x attack power
 local ORBITAL_SPRITE_SCALE = 2     -- sprite scale
 local ORBITAL_BLAST_TIME = 0.2     -- how long the blast flash stays on screen
 local PLAGUE_COUNT = 5            -- enemies poisoned at once
-local PLAGUE_PCT = 0.3            -- per second, as a fraction of magic power and of physical power
+local PLAGUE_PCT = 0.2            -- per second, as a fraction of magic power and of physical power
 local PORTAL_RADIUS = 100         -- blast radius at the landing spot
 local PORTAL_DAMAGE_PCT = 1.5     -- 1.5x magic power
 local PORTAL_REDUCTION = 0.2      -- extra damage reduction after teleporting
 local PORTAL_BUFF_TIME = 1        -- seconds that reduction lasts
 local PORTAL_BLAST_TIME = 0.25    -- how long the blast flash stays on screen
+local IMMOLATE_RADIUS_BASE = 80        -- pixels at 0 max HP
+local IMMOLATE_RADIUS_PER_HP = 0.3     -- extra pixels per point of max HP
+local IMMOLATE_RADIUS_MAX = 260        -- the radius never grows past this
+local IMMOLATE_MAGIC_PCT = 0.5         -- 0.5x magic power
+local IMMOLATE_HP_PCT = 0.1            -- plus 10% of max HP
+local IMMOLATE_COLOR = { 1, 0.2, 0.15 }
 
 -- Enemies
+local RARE_MIN_SCORE = 50
+local RARE_CHANCE = 0.05
+local RARE_HP_MULT = 5
+local RARE_SCORE = 5                     -- score granted for defeating one
+local RARE_TINT = { 0.6, 0.85, 1 }        -- light blue
+local RARE_SIZE = 1.5
+
+local BOSS_MIN_SCORE = 150
+local BOSS_CHANCE = 0.01
+local BOSS_HP_MULT = 20
+local BOSS_SCORE = 10
+local BOSS_TINT = { 1, 0.82, 0.2 }        -- golden
+local BOSS_SIZE = 2
+
 local BASE_SPAWNS_PER_SECOND = 2         -- same as the old 1 enemy per 0.5s
 local SPAWN_RAMP_START_SCORE = 50        -- enemy spawn rate stays flat until 50 score
 local SPAWN_RATE_GROWTH = 0.01           -- extra spawns per second, gained every second
@@ -104,7 +124,7 @@ local PROJECTILES = {
     fireball = { stat = "magic", pct = 1.0 },
     bullet   = { stat = "attack", pct = 1.0 },
 
-    giant_fireball = { stat = "magic", pct = 2.0},
+    giant_fireball = { stat = "magic", pct = 1.5},
     icicle = { stat = "magic", pct = 1.5 },
 }
 
@@ -155,7 +175,7 @@ local function damageEnemy(index, amount, stat)
 
     if e.enemy_hp <= 0 then
         table.remove(enemies, index)
-        score = score + 1
+        score = score + (e.scoreValue or 1)
         -- the poison moves to the closest unpoisoned enemy
         if e.poisoned and player.hasPlague then poisonClosest(e.x, e.y) end
     end
@@ -318,6 +338,28 @@ local function updateCloak(dt)
         if player.cloakRecastTimer >= CLOAK_RECAST_INTERVAL / player.castSpeed then
             player.cloakActive = true
             player.cloakAuraTimer = 0
+        end
+    end
+end
+
+local function getImmolateRadius()
+    return math.min(IMMOLATE_RADIUS_MAX, IMMOLATE_RADIUS_BASE + IMMOLATE_RADIUS_PER_HP * player.maxHp)
+end
+
+-- Immolate: once per second, burn every enemy in range
+local function updateImmolate(dt)
+    if not player.hasImmolate then return end
+
+    player.immolateTimer = player.immolateTimer + dt
+    if player.immolateTimer < 1 then return end
+    player.immolateTimer = player.immolateTimer - 1
+
+    local damage = getPower("magic") * IMMOLATE_MAGIC_PCT + player.maxHp * IMMOLATE_HP_PCT
+    local radius = getImmolateRadius()
+    for i = #enemies, 1, -1 do
+        local e = enemies[i]
+        if getDistance(player.x, player.y, e.x, e.y) < radius then
+            damageEnemy(i, damage, "magic")
         end
     end
 end
@@ -616,6 +658,9 @@ local majorPools = {
         { id = "portal_jump", name = "Portal Jump",
           text = "Space folds open wherever you point.",
           desc = "Your dash becomes a teleport spell that blasts enemies around where you land with magic damage. Gain damage reduction for a moment after teleporting." },
+        { id = "immolate", name = "Immolate",
+          text = "Your blood runs hot, and the air around you ignites.",
+          desc = "Gain max health. Burn nearby enemies every second, dealing magic damage. The damage and size both increase with your max health " },
     }},
     { name = "Cybernetic", upgrades = {
         { id = "pulse_cannon",   name = "Pulse Cannon arm",  
@@ -709,6 +754,12 @@ local majorEffects = {
         player.plagueTimer = 0
     end,
     portal_jump = function() end,   -- no setup; the dash code checks for the upgrade
+    immolate = function()
+        player.hasImmolate = true
+        player.immolateTimer = 0
+        player.maxHp = player.maxHp + 25          -- +25 max HP, healing the same amount
+        player.hp = math.min(player.maxHp, player.hp + 25)
+    end,
 }
 
 -- One random not-yet-owned upgrade from each pool
@@ -1066,6 +1117,9 @@ function resetGame()
         plagueTimer = 0,
         -- Portal Jump
         portalBuffTimer = 0,
+        -- Immolate
+        hasImmolate = false,
+        immolateTimer = 0,
 
         -- Dash variables
         dashForce = 1200,    -- dash speed in pixels per second
@@ -1175,10 +1229,12 @@ function love.gameplay(dt)
     end
 
     updateCloak(dt)
+    updateImmolate(dt)
     updateOrbit(dt)
     updateStrikes(dt)
     updatePlague(dt)
     updateBlasts(dt)
+
     if player.portalBuffTimer > 0 then player.portalBuffTimer = player.portalBuffTimer - dt end
     
     updateDamageNumbers(dt)
@@ -1304,14 +1360,28 @@ function love.gameplay(dt)
             spawnX = screenWidth + 30
             spawnY = math.random(0, screenHeight)
         end
- 
+        
+        local kind = "normal"
+        if score >= BOSS_MIN_SCORE and math.random() < BOSS_CHANCE then
+            kind = "boss"
+        elseif score >= RARE_MIN_SCORE and math.random() < RARE_CHANCE then
+            kind = "rare"     -- only reached when the enemy is not a boss
+        end
+        local hpMult = (kind == "boss" and BOSS_HP_MULT) or (kind == "rare" and RARE_HP_MULT) or 1
+        local tint = (kind == "boss" and BOSS_TINT) or (kind == "rare" and RARE_TINT) or { 1, 1, 1 }
+        local size = (kind == "boss" and BOSS_SIZE) or (kind == "rare" and RARE_SIZE) or 1
+
         local newEnemy = {
             x = spawnX,
             y = spawnY,
-            enemy_hp = 15 + math.max(0, math.floor((score - 25) / 10)),  -- enemy hp grows with score
             damage = 10 + math.max(0, math.floor((score - 50) / 25)),   -- enemy damage grows with score
             speed = 150,
-            radius = 16,
+            radius = 16 * size,
+            size = size,            
+            enemy_hp = (15 + math.max(0, math.floor((score - 25) / 10))) * hpMult,
+            kind = kind,
+            tint = tint,
+            scoreValue = (kind == "boss" and BOSS_SCORE) or (kind == "rare" and RARE_SCORE) or 1,
 
             slowTimer = 0,                          -- time left on the frostbite slow
             hitFlash = 0,                           -- Time left for hit flash effect
@@ -1665,6 +1735,15 @@ function love.draw()
         love.graphics.circle("line", player.x, player.y, CLOAK_RADIUS)
     end
 
+    -- Immolate radius
+    if player.hasImmolate then
+        local r = getImmolateRadius()
+        love.graphics.setColor(IMMOLATE_COLOR[1], IMMOLATE_COLOR[2], IMMOLATE_COLOR[3], 0.12)
+        love.graphics.circle("fill", player.x, player.y, r)
+        love.graphics.setColor(IMMOLATE_COLOR[1], IMMOLATE_COLOR[2], IMMOLATE_COLOR[3], 0.6)
+        love.graphics.circle("line", player.x, player.y, r)
+    end
+
     -- Draw player (light blue while the cloak is active, red flash on top when hit)
     local flash = player.hitFlashTimer / HIT_FLASH_TIME
     local tr, tg, tb = 1, 1, 1
@@ -1687,11 +1766,11 @@ function love.draw()
     for _, e in ipairs(enemies) do
         local flash = e.hitFlash / HIT_FLASH_TIME
         local r, g, b = 1, 1, 1
-        if e.poisoned and e.slowTimer > 0 then r, g, b = 0.3, 0.9, 0.9        -- poisoned and slowed: teal
-        elseif e.poisoned then r, g, b = 0.5, 1, 0.5                          -- poisoned: green
-        elseif e.slowTimer > 0 then r, g, b = 0.35, 0.6, 1 end                -- slowed: blue
+        local r, g, b = e.tint[1], e.tint[2], e.tint[3]
+        if e.poisoned then r, g, b = r * 0.5, g, b * 0.5 end
+        if e.slowTimer > 0 then r, g, b = r * 0.35, g * 0.6, b end
         love.graphics.setColor(r, g * (1 - 0.8 * flash), b * (1 - 0.8 * flash), 1)
-        e.animation:draw(cyborgImage, e.x, e.y, 0, 1.5, 1.5, 16, 16)
+        e.animation:draw(cyborgImage, e.x, e.y, 0, 1.5 * e.size, 1.5 * e.size, 16, 16)
     end
     love.graphics.setColor(1, 1, 1, 1)
  
